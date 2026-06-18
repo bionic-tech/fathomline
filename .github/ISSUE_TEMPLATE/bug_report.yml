@@ -1,0 +1,47 @@
+name: Bug report
+description: Something broke or behaved unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! Estate-shape details matter a lot for Fathom bugs —
+        the same scan can behave very differently on ext4 vs a 38-dataset ZFS pool.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what happened instead?
+      placeholder: Steps to reproduce, expected vs actual.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS/distro, how you run Fathom (localdev / compose / custom), Python & Node versions.
+      placeholder: |
+        - Core: Debian 12, docker compose, Postgres 16
+        - Agent host: TrueNAS SCALE 24.x, ZFS pool with N datasets
+        - Fathom version / commit:
+    validations:
+      required: true
+  - type: textarea
+    id: estate
+    attributes:
+      label: Estate shape (if scan/dedup related)
+      description: Filesystems, rough file counts, anything unusual (sparse files, non-UTF-8 names, NFS, snapshots).
+      placeholder: "~2M files across 3 volumes; one SMB share; RAID5 mdadm array"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Trim to the interesting part; redact hostnames/paths you consider private.
+      render: text
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security check
+      options:
+        - label: This is not a security vulnerability (those go through SECURITY.md, never a public issue)
+          required: true

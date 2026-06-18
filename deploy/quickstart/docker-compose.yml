@@ -1,0 +1,105 @@
+# Fathom quickstart — a generic single-host stack: PostgreSQL + schema migration + the API/UI.
+#
+# This is the smallest production-shaped deployment (real Postgres with the partitioned
+# catalogue, Alembic-owned schema, the SPA served same-origin). It makes NO assumptions about
+# your hardware: data lives in a named Docker volume and the API binds to localhost.
+#
+#   cp .env.example .env       # then set the two secrets inside
+#   docker compose up -d --build
+#   docker compose exec \
+#     -e FATHOM_BOOTSTRAP_ADMIN_USER=admin -e FATHOM_BOOTSTRAP_ADMIN_PASSWORD='choose-one' \
+#     api python -m fathom.admin create-admin
+#   open http://127.0.0.1:8088/
+#
+# Adding scan agents (mTLS proxy + per-host certs) is the next step — see README.md.
+
+name: fathom
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fathom-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fathom
+      POSTGRES_DB: fathom
+      POSTGRES_PASSWORD: ${FATHOM_DB_PASSWORD:?set FATHOM_DB_PASSWORD in .env}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      # Named volume by default. For ZFS-snapshot-friendly storage, replace with a bind mount
+      # onto a dedicated dataset (e.g. /mnt/<pool>/fathom/pgdata:/var/lib/postgresql/data).
+      - fathom-pgdata:/var/lib/postgresql/data
+    networks: [fathom]
+    # Hard ceilings so Fathom can never starve the rest of the host. Tune to taste.
+    mem_limit: ${FATHOM_DB_MEM_LIMIT:-2g}
+    cpus: 2.0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fathom -d fathom"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # No published port — only reachable on the internal `fathom` network.
+
+  # One-shot schema migration (`alembic upgrade head`), then exits. On Postgres this builds
+  # the two-level LIST-partitioned fs_entry table + indexes.
+  migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    image: fathom:local
+    container_name: fathom-migrate
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      FATHOM_DATABASE_URL: postgresql+asyncpg://fathom:${FATHOM_DB_PASSWORD}@postgres:5432/fathom
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [fathom]
+    restart: "no"
+
+  # The read/ingest/chart API + the web UI served same-origin under /.
+  api:
+    image: fathom:local
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    container_name: fathom-api
+    restart: unless-stopped
+    environment:
+      FATHOM_DATABASE_URL: postgresql+asyncpg://fathom:${FATHOM_DB_PASSWORD}@postgres:5432/fathom
+      FATHOM_AUTO_CREATE_SCHEMA: "false"   # Alembic owns the schema (migrate service).
+      # Shared secret proving an ingest request transited the mTLS proxy. Required even before
+      # you add agents — a direct call without it is rejected (fail-closed).
+      FATHOM_INGEST_PROXY_SECRET: ${FATHOM_INGEST_PROXY_SECRET:?set FATHOM_INGEST_PROXY_SECRET in .env}
+      # Localhost + plain http for the quickstart, so the session cookie cannot be Secure-only.
+      # Set true (and front with HTTPS) before exposing beyond this machine.
+      FATHOM_SESSION_COOKIE_SECURE: ${FATHOM_SESSION_COOKIE_SECURE:-false}
+      # Serve the SPA built into the image (deploy/Dockerfile stage 0).
+      FATHOM_WEB_DIST: /app/src/fathom/web/dist
+      # Churn-feed retention pruner (in-process, daily).
+      FATHOM_CHANGE_LOG_RETENTION_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      # Localhost only by default — put HTTPS (or your SSO proxy) in front before widening.
+      - "${FATHOM_API_BIND:-127.0.0.1}:${FATHOM_API_PORT:-8088}:8080"
+    networks: [fathom]
+    mem_limit: 1g
+    cpus: 2.0
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz').status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+networks:
+  fathom:
+    name: fathom
+    driver: bridge
+
+volumes:
+  fathom-pgdata:
+    name: fathom-pgdata

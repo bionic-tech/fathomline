@@ -1,0 +1,17 @@
+.git
+.venv
+**/__pycache__
+*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+htmlcov
+.coverage
+dist
+build
+deploy/*/certs
+deploy/*/agent/agent.config.yaml
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+fathom-*.txt

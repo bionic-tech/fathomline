@@ -1,0 +1,149 @@
+"""Inference provider tests (ADR-022) — schema validation, failure mapping, the egress gate.
+
+The providers are unit-tested against a stubbed httpx (no live model in the gate). A separate,
+opt-in integration test runs against a real local Ollama when one is reachable.
+"""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+from pydantic import BaseModel
+
+from fathom.core.settings import Settings
+from fathom.inference import (
+    InferenceError,
+    OllamaProvider,
+    OpenAICompatibleProvider,
+    build_inference_provider,
+)
+
+
+class _Out(BaseModel):
+    folder: str
+
+
+def _patch_post(monkeypatch: pytest.MonkeyPatch, response: httpx.Response | Exception) -> None:
+    async def fake_post(self: httpx.AsyncClient, url: str, **kw: object) -> httpx.Response:
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+
+def _ollama() -> OllamaProvider:
+    return OllamaProvider(base_url="http://x:11434", model="m", timeout_seconds=5)
+
+
+async def test_ollama_returns_validated_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_post(
+        monkeypatch, httpx.Response(200, json={"message": {"content": '{"folder":"Docs"}'}})
+    )
+    out = await _ollama().complete(system="s", user="u", schema=_Out)
+    assert isinstance(out, _Out)
+    assert out.folder == "Docs"
+
+
+async def test_ollama_timeout_is_504(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_post(monkeypatch, httpx.TimeoutException("slow"))
+    with pytest.raises(InferenceError) as exc:
+        await _ollama().complete(system="s", user="u", schema=_Out)
+    assert exc.value.status_code == 504
+
+
+async def test_ollama_unreachable_is_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_post(monkeypatch, httpx.ConnectError("down"))
+    with pytest.raises(InferenceError) as exc:
+        await _ollama().complete(system="s", user="u", schema=_Out)
+    assert exc.value.status_code == 503
+
+
+async def test_ollama_output_off_schema_is_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The model answered, but not with the requested shape → validation failure (never raw text).
+    _patch_post(monkeypatch, httpx.Response(200, json={"message": {"content": '{"nope":1}'}}))
+    with pytest.raises(InferenceError) as exc:
+        await _ollama().complete(system="s", user="u", schema=_Out)
+    assert exc.value.status_code == 502
+
+
+async def test_ollama_non_200_is_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_post(monkeypatch, httpx.Response(500, text="boom"))
+    with pytest.raises(InferenceError):
+        await _ollama().complete(system="s", user="u", schema=_Out)
+
+
+async def test_openai_parses_choices(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = {"choices": [{"message": {"content": '{"folder":"Cloud"}'}}]}
+    _patch_post(monkeypatch, httpx.Response(200, json=body))
+    prov = OpenAICompatibleProvider(
+        base_url="http://x/v1", model="m", api_key="k", timeout_seconds=5
+    )
+    out = await prov.complete(system="s", user="u", schema=_Out)
+    assert out.folder == "Cloud"
+
+
+# --- factory + egress gate (ADR-022) ----------------------------------------------------
+
+
+def test_factory_default_is_ollama() -> None:
+    prov = build_inference_provider(Settings())
+    assert isinstance(prov, OllamaProvider)
+
+
+def test_factory_cloud_refused_without_egress_gate() -> None:
+    # provider=openai but egress not allowed → fail closed (no off-host call is even constructed).
+    s = Settings(inference_provider="openai", inference_allow_egress=False)
+    with pytest.raises(InferenceError) as exc:
+        build_inference_provider(s)
+    assert exc.value.status_code == 503
+
+
+def test_factory_cloud_needs_key_reference() -> None:
+    s = Settings(
+        inference_provider="openai", inference_allow_egress=True, inference_openai_key_ref=None
+    )
+    with pytest.raises(InferenceError):
+        build_inference_provider(s)
+
+
+def test_factory_cloud_resolves_key_by_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FATHOM_TEST_INFER_KEY", "sk-secret")
+    s = Settings(
+        inference_provider="openai",
+        inference_allow_egress=True,
+        inference_openai_key_ref="FATHOM_TEST_INFER_KEY",
+    )
+    prov = build_inference_provider(s)
+    assert isinstance(prov, OpenAICompatibleProvider)
+
+
+def test_factory_unknown_provider() -> None:
+    with pytest.raises(InferenceError):
+        build_inference_provider(Settings(inference_provider="myllm"))
+
+
+# --- opt-in live integration (skipped unless a real Ollama + model is reachable) --------
+
+
+async def _ollama_live() -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get("http://127.0.0.1:11434/api/tags")
+            return r.status_code == 200 and "llama3.2:3b" in r.text
+    except httpx.HTTPError:
+        return False
+
+
+async def test_live_ollama_structured_output() -> None:
+    if not await _ollama_live():
+        pytest.skip("no local Ollama with llama3.2:3b")
+    prov = OllamaProvider(
+        base_url="http://127.0.0.1:11434", model="llama3.2:3b", timeout_seconds=60
+    )
+    out = await prov.complete(
+        system="You suggest one destination folder for a file. Reply only as JSON.",
+        user="File: invoice_2024_acme.pdf",
+        schema=_Out,
+    )
+    assert out.folder  # a non-empty suggestion, schema-validated

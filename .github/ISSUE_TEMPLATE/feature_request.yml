@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest an improvement or new capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation in your estate that Fathom doesn't handle today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to happen. Rough is fine.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you use today, or other tools that do this.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Scanning / agents
+        - Catalogue / dedup
+        - Web UI
+        - Remediation / reclaim
+        - Deployment / operations
+        - Auth / RBAC
+        - Other

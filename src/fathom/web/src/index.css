@@ -1,0 +1,517 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base shell colours (the dark estate palette from tailwind.config.ts). The components below
+   reference bespoke `fathom-*` class names; without these definitions Tailwind has nothing to
+   emit for them and the app renders as unstyled plain text — these @layer components rules are
+   what give the shell its layout/colour (frontend ADD §8). */
+@layer base {
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+  body {
+    @apply bg-fathom-bg text-slate-100 antialiased;
+  }
+  a {
+    @apply text-fathom-accent no-underline hover:underline;
+  }
+}
+
+@layer components {
+  /* Application shell ----------------------------------------------------------------- */
+  .fathom-shell {
+    @apply flex min-h-full flex-col;
+  }
+  .fathom-topbar {
+    @apply flex flex-wrap items-center gap-4 border-b border-white/10 bg-fathom-panel px-4 py-3;
+  }
+  .fathom-topbar nav {
+    @apply flex flex-wrap items-center gap-1;
+  }
+  .fathom-topbar nav a {
+    @apply rounded px-3 py-1.5 text-sm font-medium text-slate-300 no-underline hover:bg-white/5 hover:text-white;
+  }
+  .fathom-topbar nav a[aria-current="page"] {
+    @apply bg-fathom-accent/15 text-fathom-accent;
+  }
+
+  .fathom-scope {
+    @apply ml-auto flex items-center gap-2 text-sm text-slate-300;
+  }
+  .fathom-scope select {
+    @apply rounded border border-white/10 bg-fathom-bg px-2 py-1 text-slate-100;
+  }
+
+  .fathom-session {
+    @apply flex items-center gap-3 text-sm text-slate-300;
+  }
+  .fathom-session button {
+    @apply rounded border border-white/10 px-3 py-1.5 font-medium text-slate-200 hover:bg-white/5 hover:text-white;
+  }
+
+  .fathom-shell main {
+    @apply flex-1 p-4;
+  }
+
+  /* Dashboard ------------------------------------------------------------------------- */
+  .fathom-dashboard {
+    @apply grid gap-6;
+  }
+  .fathom-dashboard > section {
+    @apply rounded-lg border border-white/10 bg-fathom-panel p-4;
+  }
+  .fathom-dashboard h1 {
+    @apply mb-2 text-xl font-semibold text-white;
+  }
+
+  /* Explorer (three-pane) ------------------------------------------------------------- */
+  .fathom-explorer {
+    @apply h-full;
+  }
+  .fathom-tree-pane,
+  .fathom-listing-pane,
+  .fathom-preview-pane {
+    @apply overflow-auto rounded-lg border border-white/10 bg-fathom-panel p-3;
+  }
+  .fathom-tree-row {
+    @apply flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-left hover:bg-white/5 disabled:opacity-60;
+  }
+  .fathom-tree-name {
+    @apply truncate text-slate-200;
+  }
+  .fathom-tree-size {
+    @apply shrink-0 tabular-nums text-slate-400;
+  }
+  .fathom-listing-pane table {
+    @apply w-full border-collapse text-sm;
+  }
+  .fathom-listing-pane th,
+  .fathom-listing-pane td {
+    @apply border-b border-white/5 px-2 py-1 text-left;
+  }
+  .fathom-listing-pane th {
+    @apply font-semibold text-slate-300;
+  }
+  .fathom-listing-pane button {
+    @apply text-fathom-accent hover:underline;
+  }
+
+  /* Login ----------------------------------------------------------------------------- */
+  .fathom-login {
+    @apply flex min-h-full items-center justify-center bg-fathom-bg p-6;
+  }
+  .fathom-login-card {
+    @apply flex w-full max-w-sm flex-col gap-4 rounded-xl border border-white/10 bg-fathom-panel p-6 shadow-xl;
+  }
+  .fathom-login-title {
+    @apply text-lg font-semibold text-white;
+  }
+  .fathom-login-error {
+    @apply rounded border border-fathom-danger/40 bg-fathom-danger/10 px-3 py-2 text-sm text-fathom-danger;
+  }
+  .fathom-field {
+    @apply flex flex-col gap-1 text-sm text-slate-300;
+  }
+  .fathom-field input,
+  .fathom-field select,
+  .fathom-field textarea {
+    @apply rounded border border-white/10 bg-fathom-bg px-3 py-2 text-slate-100 outline-none focus:border-fathom-accent focus:ring-1 focus:ring-fathom-accent;
+  }
+  /* Dark-theme the native option list too (some browsers render <option> on white otherwise). */
+  .fathom-field select option {
+    @apply bg-fathom-panel text-slate-100;
+  }
+  .fathom-login-submit {
+    @apply mt-1 rounded bg-fathom-accent px-3 py-2 font-medium text-fathom-bg hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  /* Data feature pages (Duplicates / Scans / Agents / Audit / Settings) ---------------- */
+  .fathom-page {
+    @apply grid gap-6;
+  }
+  .fathom-page > h1,
+  .fathom-page-head h1 {
+    @apply text-xl font-semibold text-white;
+  }
+  .fathom-page-head {
+    @apply grid gap-1;
+  }
+  .fathom-muted {
+    @apply text-sm text-slate-400;
+  }
+  .fathom-card {
+    @apply grid gap-3 rounded-lg border border-white/10 bg-fathom-panel p-4;
+  }
+  .fathom-card-title {
+    @apply text-base font-semibold text-white;
+  }
+  /* Deploy wizard (ADR-026) ----------------------------------------------------------- */
+  .fathom-tabs {
+    @apply flex gap-2;
+  }
+  .fathom-form-grid {
+    @apply grid gap-3 sm:grid-cols-2;
+  }
+  .fathom-field-wide {
+    @apply sm:col-span-2;
+  }
+  .fathom-card input,
+  .fathom-card select,
+  .fathom-card textarea {
+    @apply rounded border border-white/10 bg-fathom-bg px-3 py-2 text-slate-100 outline-none focus:border-fathom-accent focus:ring-1 focus:ring-fathom-accent;
+  }
+  .fathom-code-block {
+    @apply overflow-x-auto rounded border border-white/10 bg-fathom-bg p-3 text-xs text-slate-200;
+  }
+
+  /* Tables (shared) ------------------------------------------------------------------- */
+  .fathom-table {
+    @apply w-full border-collapse text-sm;
+  }
+  .fathom-table th,
+  .fathom-table td {
+    @apply border-b border-white/5 px-2 py-1.5 text-left align-top;
+  }
+  .fathom-table th {
+    @apply font-semibold text-slate-300;
+  }
+  .fathom-table .fathom-path,
+  .fathom-path {
+    @apply break-all text-slate-200;
+  }
+  .fathom-mono,
+  .fathom-hash {
+    @apply font-mono text-xs text-slate-300;
+  }
+  .fathom-detail-cell {
+    @apply bg-black/20 p-3;
+  }
+  .fathom-row-broken {
+    @apply bg-fathom-danger/10;
+  }
+
+  /* Agent config panel (ADR-033: reported config + override editor) -------------------- */
+  .fathom-agent-config {
+    @apply text-sm text-slate-300;
+  }
+  .fathom-agent-config-cols {
+    @apply grid gap-6;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  }
+  .fathom-agent-config h4 {
+    @apply mb-2 font-semibold text-slate-200;
+  }
+  .fathom-deflist {
+    @apply grid gap-x-3 gap-y-1;
+    grid-template-columns: max-content 1fr;
+  }
+  .fathom-deflist dt {
+    @apply text-slate-400;
+  }
+  .fathom-deflist dd {
+    @apply text-slate-200;
+  }
+  .fathom-codeblock {
+    @apply whitespace-pre-wrap break-all rounded bg-black/30 px-2 py-1 font-mono text-xs text-slate-300;
+  }
+
+  /* Live directory explorer (ADR-034 Phase 2) ----------------------------------------- */
+  .fathom-tree-controls {
+    @apply mb-1 flex flex-wrap items-center gap-2;
+  }
+  .fathom-tree-wrap {
+    @apply mb-2 max-h-80 overflow-auto rounded border border-white/10 bg-black/20 p-2 text-sm;
+  }
+  .fathom-tree,
+  .fathom-tree-root {
+    @apply list-none;
+  }
+  .fathom-tree-row {
+    @apply flex items-center justify-between gap-2 rounded py-0.5 hover:bg-white/5;
+  }
+  .fathom-tree-actions {
+    @apply flex shrink-0 gap-1;
+  }
+  .fathom-btn-mini {
+    @apply rounded border border-white/10 px-1.5 py-0.5 text-xs text-slate-300 hover:bg-white/10 hover:text-white;
+  }
+  .fathom-tree-mfa {
+    @apply my-1 flex-row flex-wrap items-center gap-2;
+  }
+
+  /* Disclosure / pager / buttons ------------------------------------------------------ */
+  .fathom-disclosure {
+    @apply rounded px-1 text-fathom-accent hover:underline;
+  }
+  .fathom-pager {
+    @apply flex gap-2;
+  }
+  .fathom-btn {
+    @apply rounded border border-white/10 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-white/5 hover:text-white disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .fathom-btn-primary {
+    @apply border-transparent bg-fathom-accent text-fathom-bg hover:brightness-110;
+  }
+  .fathom-btn-danger {
+    @apply ml-2 border-fathom-danger/40 text-fathom-danger hover:bg-fathom-danger/10;
+  }
+  .fathom-btn-active {
+    @apply border-fathom-accent/50 bg-fathom-accent/15 text-white;
+  }
+  .fathom-link {
+    @apply rounded text-fathom-accent hover:underline;
+  }
+
+  /* KPI cards (dashboard header) ------------------------------------------------------ */
+  .fathom-kpi-row {
+    @apply grid gap-3;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+  .fathom-kpi {
+    @apply rounded-lg border border-white/10 bg-fathom-panel p-4;
+  }
+  .fathom-kpi-value {
+    @apply text-2xl font-semibold text-white;
+  }
+  .fathom-kpi-label {
+    @apply mt-1 text-xs uppercase tracking-wide text-slate-400;
+  }
+  .fathom-kpi-sub {
+    @apply mt-0.5 truncate text-xs text-slate-500;
+  }
+  /* A KPI that's clickable (opens the inventory modal): bare full-width button wrapping a .fathom-kpi. */
+  .fathom-kpi-button {
+    @apply block w-full cursor-pointer border-0 bg-transparent p-0 text-left;
+  }
+  .fathom-kpi-button:hover .fathom-kpi {
+    @apply border-white/30 bg-white/5;
+  }
+  /* Estate-inventory modal body: scrollable list of hosts + their volume tables. */
+  .fathom-inv-body {
+    @apply mt-2 grid max-h-[60vh] gap-4 overflow-auto;
+  }
+  .fathom-inv-host h3 {
+    @apply mb-1 text-sm font-semibold text-white;
+  }
+  /* Collapsible inline explainer (What is a deep scan? etc.). */
+  .fathom-explainer {
+    @apply mt-2 rounded-md border border-white/10 bg-white/5 p-3 text-sm text-slate-300;
+  }
+  .fathom-explainer summary {
+    @apply cursor-pointer font-medium text-slate-200;
+  }
+  .fathom-explainer p {
+    @apply mt-2;
+  }
+
+  /* Card head + view toggle + toolbar ------------------------------------------------- */
+  .fathom-card-head {
+    @apply flex items-center justify-between gap-3;
+  }
+  .fathom-view-toggle {
+    @apply flex gap-1;
+  }
+  .fathom-toolbar {
+    @apply flex flex-wrap items-center justify-between gap-3;
+  }
+  .fathom-toolbar-controls {
+    @apply flex flex-wrap items-end gap-3;
+  }
+  .fathom-inline-field {
+    @apply grid gap-1 text-xs font-medium text-slate-400;
+  }
+  .fathom-inline-field select {
+    @apply rounded border border-white/10 bg-fathom-bg px-2 py-1 text-sm text-slate-100 outline-none focus:border-fathom-accent;
+  }
+  .fathom-inline-checkbox {
+    @apply flex items-center gap-2 text-sm text-slate-300;
+  }
+  .fathom-delta-up {
+    @apply text-amber-300;
+  }
+  .fathom-delta-down {
+    @apply text-emerald-300;
+  }
+
+  /* Search bar ------------------------------------------------------------------------ */
+  .fathom-search-bar {
+    @apply flex flex-wrap items-center gap-4;
+  }
+  .fathom-search-bar input[type="search"] {
+    @apply w-full max-w-xl rounded border border-white/10 bg-fathom-bg px-3 py-2 text-slate-100 outline-none focus:border-fathom-accent focus:ring-1 focus:ring-fathom-accent;
+  }
+  .fathom-hint {
+    @apply text-xs;
+  }
+
+  /* Breadcrumbs ----------------------------------------------------------------------- */
+  .fathom-breadcrumbs {
+    @apply flex flex-wrap items-center gap-1 text-sm;
+  }
+  .fathom-crumb {
+    @apply rounded px-1 text-fathom-accent hover:underline;
+  }
+  .fathom-crumb-current {
+    @apply px-1 font-semibold text-slate-200;
+  }
+  .fathom-crumb-sep {
+    @apply px-0.5 text-slate-600;
+  }
+
+  /* Listing: sortable headers + drill names ------------------------------------------- */
+  .fathom-sort-th {
+    @apply inline-flex items-center font-semibold text-slate-300 hover:text-white;
+  }
+  .fathom-listing-name {
+    @apply break-all text-left text-fathom-accent hover:underline;
+  }
+
+  /* Modal + remediation wizard -------------------------------------------------------- */
+  .fathom-modal-backdrop {
+    @apply fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-6;
+  }
+  .fathom-modal {
+    @apply my-8 grid w-full max-w-2xl gap-4 rounded-lg border border-white/10 bg-fathom-panel p-5 shadow-xl;
+  }
+  .fathom-modal-head {
+    @apply flex items-center justify-between gap-3;
+  }
+  .fathom-modal-head h2 {
+    @apply text-lg font-semibold text-white;
+  }
+  .fathom-modal-foot {
+    @apply flex justify-end gap-2;
+  }
+  .fathom-wizard-steps {
+    @apply flex gap-2 text-xs text-slate-500;
+  }
+  .fathom-wizard-steps li {
+    @apply rounded bg-white/5 px-2 py-1;
+  }
+  .fathom-wizard-steps li.is-active {
+    @apply bg-fathom-accent/20 text-fathom-accent;
+  }
+  .fathom-keeper-list {
+    @apply grid max-h-64 gap-1 overflow-y-auto;
+  }
+  .fathom-keeper-row {
+    @apply flex items-center gap-2 rounded px-2 py-1 text-sm hover:bg-white/5;
+  }
+  .fathom-plan-items {
+    @apply max-h-48 list-disc overflow-y-auto rounded bg-black/20 p-3 pl-6 text-xs text-slate-300;
+  }
+
+  /* Badges ---------------------------------------------------------------------------- */
+  .fathom-badge {
+    @apply inline-block rounded px-2 py-0.5 text-xs font-medium;
+  }
+  .fathom-badge-online,
+  .fathom-badge-keeper {
+    @apply bg-emerald-500/15 text-emerald-300;
+  }
+  .fathom-badge-offline {
+    @apply bg-fathom-danger/15 text-fathom-danger;
+  }
+  .fathom-badge-fullbit {
+    @apply bg-amber-500/15 text-amber-300;
+  }
+  .fathom-badge-metadata {
+    @apply bg-sky-500/15 text-sky-300;
+  }
+  /* Risk classes (riskClass.ts): OS = red, service data = orange, config/compose = yellow. */
+  .fathom-badge-risk-os {
+    @apply bg-red-600/20 text-red-300 ring-1 ring-red-500/40;
+  }
+  .fathom-badge-risk-services {
+    @apply bg-orange-500/20 text-orange-300 ring-1 ring-orange-500/40;
+  }
+  .fathom-badge-risk-config {
+    @apply bg-yellow-500/15 text-yellow-200 ring-1 ring-yellow-500/30;
+  }
+  .fathom-badge-role {
+    @apply bg-fathom-accent/15 text-fathom-accent;
+  }
+  .fathom-badge-flag {
+    @apply bg-violet-500/15 text-violet-300;
+  }
+
+  /* Explorer detail pane -------------------------------------------------------------- */
+  .fathom-detail-name {
+    @apply mb-2 break-all text-base font-semibold text-slate-100;
+  }
+  .fathom-flag-row {
+    @apply mt-3 flex flex-wrap gap-1;
+  }
+
+  /* Forms ----------------------------------------------------------------------------- */
+  .fathom-form {
+    @apply grid gap-3;
+  }
+  .fathom-form-inline {
+    @apply mt-3 grid-flow-col items-end gap-3;
+    grid-auto-columns: max-content;
+  }
+  .fathom-form input,
+  .fathom-form select {
+    @apply rounded border border-white/10 bg-fathom-bg px-3 py-2 text-slate-100 outline-none focus:border-fathom-accent focus:ring-1 focus:ring-fathom-accent;
+  }
+  .fathom-inline-error {
+    @apply rounded border border-fathom-danger/40 bg-fathom-danger/10 px-3 py-2 text-sm text-fathom-danger;
+  }
+  .fathom-inline-ok {
+    @apply rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300;
+  }
+
+  /* Key/value + lists ----------------------------------------------------------------- */
+  .fathom-keyvals {
+    @apply grid gap-x-4 gap-y-1 text-sm;
+    grid-template-columns: max-content 1fr;
+  }
+  .fathom-keyvals dt {
+    @apply font-semibold text-slate-400;
+  }
+  .fathom-keyvals dd {
+    @apply text-slate-200;
+  }
+  .fathom-grant-list,
+  .fathom-assignment-list {
+    @apply grid gap-1;
+  }
+  .fathom-assignment-list li {
+    @apply flex items-center gap-2 text-sm text-slate-200;
+  }
+
+  /* Loading / error ------------------------------------------------------------------- */
+  .fathom-loading {
+    @apply flex min-h-screen items-center justify-center gap-3 bg-fathom-bg text-slate-300;
+  }
+  .fathom-spinner {
+    @apply inline-block h-5 w-5 animate-spin rounded-full border-2 border-white/20 border-t-fathom-accent;
+  }
+  .fathom-error {
+    @apply m-6 rounded-lg border border-fathom-danger/40 bg-fathom-danger/10 p-4 text-fathom-danger;
+  }
+}
+
+/* Visually-hidden but screen-reader-available (frontend ADD §9: data tables are always in the
+   a11y tree even when the chart is shown visually). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.fathom-three-pane {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr minmax(240px, 1fr);
+  gap: 0.5rem;
+}

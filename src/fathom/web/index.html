@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      The authoritative Content-Security-Policy is sent as a response *header* by the api
+      container's SecurityHeadersMiddleware (no unsafe-inline / no unsafe-eval, frontend ADD
+      §12). No inline <script>/<style> appears in this document, so the strict header holds.
+    -->
+    <title>Fathomline — Storage Estate Analyzer</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

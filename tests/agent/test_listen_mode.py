@@ -88,8 +88,10 @@ def test_resolve_mode_argv_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_main_listen_fail_closed_exit_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A listen run whose config lacks write_enabled is refused at startup → non-zero exit so a
-    # supervisor alerts, and NOTHING is dispatched (the daemon never opened a connection).
+    # A listen run whose config has no orchestrator_pubkey_ref (no trusted key) is refused at
+    # startup → non-zero exit so a supervisor alerts, and NOTHING is dispatched (the daemon never
+    # opened a connection). write_enabled=false is NO LONGER a refusal — it's a valid scan-only
+    # listener (read-only Scan Now, no write path) — so the fail-closed gate is the missing key.
     from fathom.agent.__main__ import main
 
     cfg_yaml = (
@@ -100,8 +102,7 @@ def test_main_listen_fail_closed_exit_code(tmp_path: Path, monkeypatch: pytest.M
         "server_ca_path: /etc/fathom/ca.crt\n"
         "scan_scope: [/mnt/pool/media]\n"
         "write_enabled: false\n"
-        f"quarantine_dir: {tmp_path / 'q'}\n"
-        "orchestrator_pubkey_ref: orch_pub\n"
+        # orchestrator_pubkey_ref deliberately omitted → no trusted key → refused.
         "throttle:\n"
         "  pause_when: {load1_above: 6.0, iowait_above_percent: 25}\n"
         "  resume_when: {load1_below: 3.0}\n"
@@ -124,10 +125,19 @@ def test_main_unknown_mode_exit_code(tmp_path: Path, monkeypatch: pytest.MonkeyP
 # --- fail-closed startup ----------------------------------------------------------------
 
 
-def test_refuses_without_write_enabled(tmp_path: Path) -> None:
-    cfg = _config(quarantine_dir=str(tmp_path / "q"), write_enabled=False)
-    with pytest.raises(ListenStartupError, match="write_enabled"):
-        build_listener_from_config(cfg, secret_provider=lambda _r: "x")
+def test_scan_only_listener_builds_without_quarantine(tmp_path: Path) -> None:
+    # write_enabled=false is NOT a refusal: it builds a SCAN-ONLY listener (read-only Scan Now, no
+    # write path) — no quarantine_dir, no remediation dispatcher. HMAC key so build_verifier passes.
+    cfg = _config(
+        quarantine_dir=None,  # type: ignore[arg-type]
+        write_enabled=False,
+        orchestrator_signing_algorithm="hmac",
+    )
+    listener = build_listener_from_config(
+        cfg, secret_provider=lambda _r: "k" * 40, staging_path=str(tmp_path / "staging.sqlite")
+    )
+    assert listener._dispatcher is None  # no write path
+    assert listener._scan_dispatcher is not None  # read-only Scan Now is wired
 
 
 def test_refuses_without_pubkey_ref(tmp_path: Path) -> None:
@@ -136,11 +146,17 @@ def test_refuses_without_pubkey_ref(tmp_path: Path) -> None:
         build_listener_from_config(cfg, secret_provider=lambda _r: "x")
 
 
-def test_refuses_without_quarantine_dir(tmp_path: Path) -> None:
-    cfg = _config(quarantine_dir=str(tmp_path / "q"))
-    cfg = cfg.model_copy(update={"quarantine_dir": None})
+def test_full_listener_refuses_without_quarantine_dir(tmp_path: Path) -> None:
+    # write_enabled=true → the FULL (write-path) listener still requires a quarantine_dir for the
+    # reversible tier. (Valid HMAC key so build_verifier passes and we reach the quarantine check.)
+    cfg = _config(
+        quarantine_dir=None,  # type: ignore[arg-type]
+        orchestrator_signing_algorithm="hmac",
+    )
     with pytest.raises(ListenStartupError, match="quarantine_dir"):
-        build_listener_from_config(cfg, secret_provider=lambda _r: "x")
+        build_listener_from_config(
+            cfg, secret_provider=lambda _r: "k" * 40, staging_path=str(tmp_path / "staging.sqlite")
+        )
 
 
 def test_refuses_when_pubkey_ref_unresolved(tmp_path: Path) -> None:

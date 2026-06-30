@@ -22,6 +22,7 @@ vi.mock("../api/client", async () => {
 
 // Import after the mock is registered so routes/queries pick up the mocked client.
 const { routes } = await import("../app/routes");
+const { RequireAuth } = await import("./RequireAuth");
 
 function renderApp(initial: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -98,5 +99,46 @@ describe("auth guard", () => {
       }),
     );
     expect(await screen.findByRole("button", { name: "Sign out" })).toBeInTheDocument();
+  });
+});
+
+describe("auth guard error branches", () => {
+  // Render RequireAuth alone behind a known errorElement + a stub /login, so a thrown render error
+  // is unambiguously distinguishable from a redirect-to-login (EC-nav-10 / EC-auth-22 / EC-auth-33).
+  function renderGuard() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const router = createMemoryRouter(
+      [
+        { path: "/dashboard", element: <RequireAuth />, errorElement: <div>error-boundary</div> },
+        { path: "/login", element: <div>login-page</div> },
+      ],
+      { initialEntries: ["/dashboard"] },
+    );
+    return render(
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+  }
+
+  it("bubbles a 5xx to the error boundary instead of masquerading as logged-out", async () => {
+    apiGet.mockRejectedValue(new ApiError(503, { status: 503, title: "Service Unavailable" }));
+    renderGuard();
+    expect(await screen.findByText("error-boundary")).toBeInTheDocument();
+    expect(screen.queryByText("login-page")).not.toBeInTheDocument();
+  });
+
+  it("redirects a non-401 4xx (e.g. 403) to the login page", async () => {
+    apiGet.mockRejectedValue(new ApiError(403, { status: 403, title: "Forbidden" }));
+    renderGuard();
+    expect(await screen.findByText("login-page")).toBeInTheDocument();
+    expect(screen.queryByText("error-boundary")).not.toBeInTheDocument();
+  });
+
+  it("redirects an undefined-status (non-ApiError network) failure to the login page", async () => {
+    apiGet.mockRejectedValue(new Error("network down"));
+    renderGuard();
+    expect(await screen.findByText("login-page")).toBeInTheDocument();
+    expect(screen.queryByText("error-boundary")).not.toBeInTheDocument();
   });
 });

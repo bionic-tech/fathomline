@@ -63,6 +63,19 @@ describe("ChartAdapter option builders", () => {
     expect(series).toHaveLength(2);
     expect(series.every((s) => s.type === "bar")).toBe(true);
   });
+  it("groups volume bars by host with one band per host", () => {
+    const base = { fs_type: "zfs", device: "d", transport: "sata", raid_role: null, total: 2, used: 1, free: 1 };
+    const multi: VolumeOut[] = [
+      { id: 1, host_id: 2, mountpoint: "/b/root", ...base },
+      { id: 2, host_id: 1, mountpoint: "/a/root", ...base },
+      { id: 3, host_id: 1, mountpoint: "/a/data", ...base },
+    ];
+    const option = buildVolumeBarOption(multi, { hostName: (id) => `host-${id}` });
+    // Ordered by host_id ascending so a machine's disks sit together: host1(root,data), host2(root).
+    expect((option.xAxis as { data: string[] }).data).toEqual(["root", "data", "root"]);
+    const series = option.series as Array<{ markArea?: { data: unknown[] } }>;
+    expect(series[0].markArea?.data).toHaveLength(2); // one band per host
+  });
   it("builds a volume pie", () => {
     expect(seriesType(buildVolumePieOption(volumes[0]))).toBe("pie");
   });

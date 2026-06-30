@@ -14,6 +14,7 @@ step-up is required.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pyotp
@@ -25,6 +26,32 @@ DEFAULT_FRESHNESS_SECONDS = 300
 def generate_secret() -> str:
     """Return a fresh base32 TOTP secret (stored in the secret backend, never the DB)."""
     return pyotp.random_base32()
+
+
+def secret_ref_for(enrollment_id: int) -> str:
+    """Settings-store reference under which an enrollment's TOTP secret is stored (P0b / ADR-010).
+
+    The raw base32 secret is encrypted at rest in the runtime settings store (ADR-038) under this
+    stable, per-enrollment name; only the name lands in ``MfaEnrollment.secret_ref`` — never the
+    secret itself.
+    """
+    return f"mfa:{enrollment_id}"
+
+
+def resolve_enrollment_secret(
+    secret_ref: str, resolver: Callable[[str], str | None]
+) -> str:
+    """Resolve an enrollment's TOTP secret from its ``secret_ref`` (legacy raw secret as fallback).
+
+    Hardened enrollments (P0b) keep only a *reference* in ``secret_ref`` and the encrypted base32
+    secret in the settings store; ``resolver`` (the store's ``resolve_secret``) returns the
+    decrypted secret for such a reference. A LEGACY enrollment (pre-hardening) instead holds the
+    raw base32 secret directly in ``secret_ref`` — there the resolver returns ``None`` and we treat
+    ``secret_ref`` itself as the secret, so existing plaintext enrollments keep verifying until the
+    user re-enrolls (which then stores the secret encrypted). No bulk migration of live secrets.
+    """
+    resolved = resolver(secret_ref)
+    return resolved if resolved is not None else secret_ref
 
 
 def provisioning_uri(secret: str, *, account: str, issuer: str = "Fathom") -> str:

@@ -19,8 +19,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fathom.agent.actor.dispatch import ActorDispatcher, JobResult
-from fathom.core.remediation.job import SignedJob
+from fathom.agent.actor.dispatch import (
+    ActorDispatcher,
+    JobResult,
+    RemediationUnavailableError,
+    ScanDispatcher,
+    ScanScopeError,
+)
+from fathom.core.remediation.job import ScanJob, SignedJob
 from fathom.core.remediation.signing import (
     NonceStore,
     Verifier,
@@ -42,12 +48,16 @@ class SignedJobListener:
     def __init__(
         self,
         *,
-        dispatcher: ActorDispatcher,
+        dispatcher: ActorDispatcher | None = None,
         verifier: Verifier,
         nonce_store: NonceStore,
         host_id: str,
         write_enabled: bool = False,
+        scan_dispatcher: ScanDispatcher | None = None,
     ) -> None:
+        # ``dispatcher`` is None on a SCAN-ONLY listener (read-only Scan Now, no write path): a
+        # verified remediation job is then refused fail-closed (see handle()), so a host can run
+        # Scan Now without arming remediation (and a native Windows agent stays read-only, ADR-027).
         self._dispatcher = dispatcher
         self._verifier = verifier
         self._nonce_store = nonce_store
@@ -56,6 +66,10 @@ class SignedJobListener:
         # valid execute job does nothing until write_enabled is deliberately turned on. The
         # executor enforces this too (defence in depth) — this lets the listener refuse early.
         self._write_enabled = write_enabled
+        # The read-only Scan Now branch (ADR-025 + Scan Now). A scan mutates nothing, so it does
+        # not ride the write gate — but a listener built without one still refuses scan jobs
+        # (fail-closed rather than silently swallow a verified job it cannot service).
+        self._scan_dispatcher = scan_dispatcher
 
     async def handle(
         self, signed: SignedJob, *, confirm_blast: bool = False, now: datetime | None = None
@@ -75,6 +89,27 @@ class SignedJobListener:
             expected_host_id=self._host_id,
             now=now,
         )
+        # Branch on the verified job type (the signed-job union, ADR-025). A ScanJob carries no plan
+        # and moves nothing — it routes to the read-only Scan Now dispatcher, NOT the remediation
+        # executor; only an ActionJob falls through to the dry-run/execute path below (unchanged).
+        if isinstance(job, ScanJob):
+            if self._scan_dispatcher is None:
+                raise ScanScopeError(
+                    "received a scan-now job but this listener is not configured to run scans"
+                )
+            result = await self._scan_dispatcher.dispatch_scan(job)
+            _log.info(
+                "scan-now job verified and triggered",
+                extra={"root": job.root, "mode": job.mode},
+            )
+            return result
+        # ActionJob (remediation): a scan-only listener has no write dispatcher — refuse it
+        # fail-closed (never act) rather than swallow a verified job it cannot service. The nonce
+        # burned in verify_job above still blocks any replay.
+        if self._dispatcher is None:
+            raise RemediationUnavailableError(
+                "received a remediation job but this listener is scan-only (no write path)"
+            )
         if job.mode == "dry_run":
             report = await self._dispatcher.dispatch_dry_run(job)
             _log.info(

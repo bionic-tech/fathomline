@@ -51,6 +51,9 @@ class Host(Base):
     # null desired = no override (agent runs its local file unchanged).
     reported_config: Mapped[dict[str, object] | None] = mapped_column(JSON, default=None)
     desired_config: Mapped[dict[str, object] | None] = mapped_column(JSON, default=None)
+    # ADR-037 host hardware facts (cpu_cores/cpu_model/ram_bytes/gpu_name/gpu_vram_bytes/arch),
+    # agent-probed + reported on ingest. Drives the suitability engine. Null = a pre-facts agent.
+    facts: Mapped[dict[str, object] | None] = mapped_column(JSON, default=None)
 
     volumes: Mapped[list[Volume]] = relationship(back_populates="host")
 

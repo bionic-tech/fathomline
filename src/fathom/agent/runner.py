@@ -15,6 +15,7 @@ import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 
 from fathom.adapters.base import PlatformAdapter
 from fathom.adapters.resync import adapter_resync_provider
@@ -53,6 +54,13 @@ FINALIZE_PATH = "/api/v1/agents/finalize"
 # timeout (which made finalize "fail" while the server kept working). Give it a generous ceiling;
 # it runs once per scan and is best-effort, so a slow finalize never blocks an otherwise-good run.
 FINALIZE_TIMEOUT_SECONDS = 900.0
+
+# The drain pushes ingest batches (fast) AND the removals batch. On a large estate the server-side
+# removals reconciliation (marking absent rows not-present, ADR-006) is a bulk pass that can exceed
+# the 30s default ingest timeout on a multi-million-row volume — the SAME "agent gives up while the
+# server keeps working" failure that bit finalize. Give each drain POST a generous read ceiling
+# (normal chunks still return in <1s; only the heavy removals chunk uses the headroom).
+DRAIN_TIMEOUT_SECONDS = 600.0
 
 RUNS_PATH = "/api/v1/agents/runs"
 
@@ -119,6 +127,24 @@ async def fetch_config_override(config: AgentConfig) -> dict[str, object] | None
         return data if isinstance(data, dict) else None
 
 
+SCAN_LEASE_PATH = "/api/v1/agents/scan-lease"
+
+
+async def request_scan_lease(config: AgentConfig) -> dict[str, object]:
+    """Ask the core for a pre-scan lease (ADR-036) over the mTLS channel; return its decision.
+
+    The host is the verified cert fingerprint (same boundary as ingest). Returns the coordinator's
+    JSON verdict (``granted``/``status``/``reason``/``retry_after_seconds``/``blocking_host``).
+    Raises on transport/HTTP errors — the caller treats it as best-effort and scans anyway
+    (fail-open: a missing/old/unreachable coordinator never blocks a scan).
+    """
+    async with mtls_client(config) as client:
+        resp = await client.post(SCAN_LEASE_PATH)
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
+
+
 def _default_feed_for(
     backend: StorageBackend,
     volume: VolumeInfo,
@@ -134,10 +160,10 @@ def _default_feed_for(
       full walk — correct and conservative (never miss a change), the explicit ADR-006 fallback for
       "the feed cannot run (no snapshots)".
     * **Everything else** — the portable :class:`RestatFeed`: it re-``stat``\\ s the tree and diffs
-      against the prior cycle's ``{inode: (mtime, path)}`` baseline (loaded from the persisted
-      staged rows) to emit only created/modified/deleted entries. Deletions key on inode-without-dev
-      (the known single-fs followup) — correct for a single filesystem, which is the only shape this
-      fallback feeds today (a cross-dataset baseline needs ``dev`` threaded through first).
+      against the prior cycle's ``{(dev, inode): (mtime, path)}`` baseline (loaded from the
+      persisted staged rows) to emit only created/modified/deleted entries. Both the baseline and
+      deletions key on ``(dev, inode)`` — matching the catalogue identity — so colliding inodes on
+      different ZFS child datasets of a ``cross_mounts`` volume don't collapse.
     """
     if volume.fs_type == "zfs":
         # No snapshot/bookmark plumbing yet → cannot run zfs diff safely; full-walk fallback.
@@ -191,7 +217,7 @@ class AgentRunSummary:
 
 
 async def _mtls_drain(config: AgentConfig, staging: StagingStore, *, push_chunk: int) -> int:
-    async with mtls_client(config) as client:
+    async with mtls_client(config, timeout=DRAIN_TIMEOUT_SECONDS) as client:
         return await PushClient(client, chunk_size=push_chunk).drain(staging)
 
 
@@ -356,6 +382,14 @@ async def _scan_one_scope(
     deferred to the next full walk.
     """
     volume = await backend.volume_info(root)
+    # ADR-029 relabel: a configured per-scope label (the real host path behind a synthetic container
+    # mount, e.g. /scan/docker_data → /mnt/docker_data) becomes the volume's display_name so the UI
+    # shows the real path. The backend already sets display_name for remote volumes (mount_key) —
+    # don't override that; this only fills the local-scan case the backend leaves None.
+    if volume.display_name is None:
+        label = config.scope_labels.get(root)
+        if label:
+            volume = volume.model_copy(update={"display_name": label})
     ack = WarningAck(
         operator=operator,
         acknowledged_at=datetime.now(tz=UTC),
@@ -569,3 +603,65 @@ async def run_agent(
         },
     )
     return summary
+
+
+async def scan_one_root_now(
+    config: AgentConfig,
+    *,
+    root: str,
+    mode: Literal["metadata", "fullbit"],
+    staging_path: str,
+    operator: str,
+    batch_size: int = 1000,
+    push_chunk: int = 1000,
+    drain: DrainFn | None = None,
+    finalize: FinalizeFn | None = None,
+    adapter: PlatformAdapter | None = None,
+    adapter_pool: str | None = None,
+    secret_provider: SecretProvider | None = None,
+    registry: BackendRegistry | None = None,
+    feed_factory: FeedFactory | None = None,
+) -> AgentRunSummary:
+    """Scan exactly one in-scope local ``root`` NOW (Scan Now, P3) — reuses :func:`run_agent`.
+
+    Builds a one-root scoped view of ``config`` (``scan_scope == [root]``, no remote targets) and
+    runs the SAME scan -> stage -> push -> finalize pipeline as a full agent run, restricted to that
+    root. ``mode='metadata'`` suppresses the full-bit pass (empty ``fullbit_scope``) for a pure
+    metadata refresh; ``mode='fullbit'`` keeps the full-bit pass ONLY when ``root`` is already in
+    the host's ``fullbit_scope`` (content-hashing can never widen the host's standing full-bit
+    allow-list — defence-in-depth, fullbit-dedup). ``force_full_walk=True`` so an immediate Scan Now
+    re-walks fully (and, for full-bit, re-funnels the freshly-staged candidates) rather than taking
+    the light-touch incremental path.
+
+    Scope note: because the scoped view sets ``scan_scope = [root]``, ``run_agent``'s own per-root
+    ``in_scope`` gate trivially passes for ``root`` — so the caller MUST have already verified
+    ``root`` lies within the agent's *real* ``scan_scope`` (the actor's defence-in-depth refusal;
+    see :class:`fathom.agent.actor.dispatch.ScanDispatcher`). The server re-enforces scope on
+    ingest regardless (AR-0012).
+    """
+    fullbit_now = mode == "fullbit" and config.in_fullbit_scope(root)
+    # Narrow, never widen: model_copy carries every transport/identity/secret field unchanged and
+    # only restricts what is scanned this run. (No re-validation needed — both lists are subsets of
+    # already-validated config, trivially satisfying fullbit ⊆ scan_scope.)
+    scoped = config.model_copy(
+        update={
+            "scan_scope": [root],
+            "fullbit_scope": [root] if fullbit_now else [],
+            "remote_targets": [],
+        }
+    )
+    return await run_agent(
+        scoped,
+        staging_path=staging_path,
+        operator=operator,
+        batch_size=batch_size,
+        push_chunk=push_chunk,
+        drain=drain,
+        finalize=finalize,
+        adapter=adapter,
+        adapter_pool=adapter_pool,
+        secret_provider=secret_provider,
+        registry=registry,
+        feed_factory=feed_factory,
+        force_full_walk=True,
+    )

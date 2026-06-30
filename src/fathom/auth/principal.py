@@ -43,6 +43,7 @@ class Capability(StrEnum):
     MANAGE_USERS = "manage_users"  # users / roles / scopes
     MANAGE_AGENTS = "manage_agents"  # agents / certs (PKI)
     DEPLOY_AGENT = "deploy_agent"  # deploy/enroll agents to fleet hosts (ADR-026); +step-up MFA
+    MANAGE_SETTINGS = "manage_settings"  # runtime settings store (ADR-038); reveal/set-secret +MFA
 
 
 # Capabilities granted to each role *in its own right* (before inheritance), straight from

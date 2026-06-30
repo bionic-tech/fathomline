@@ -130,13 +130,22 @@ async def get_duplicate(
             status_code=status.HTTP_404_NOT_FOUND, detail="duplicate group not found"
         )
     group, members = found
+    # Recompute the aggregate over the VISIBLE members only (EC-dedup-5b). Returning the stored
+    # whole-group member_count / reclaimable_bytes would disclose a count of copies the principal
+    # cannot see — out-of-scope members are already hidden from `members`. Mirror the build-time
+    # formula (dedup_service): reclaimable counts only NATIVE copies, since a network-mount alias
+    # is a remote view and frees nothing (ADR-032).
+    visible_native = sum(1 for m in members if not m.is_mount_alias)
+    visible_reclaimable = group.size * max(0, visible_native - 1)
+    # Don't point at a suggested keeper the principal can't see; the suggestion is non-binding.
+    keeper_visible = group.suggested_keeper_entry_id in {m.entry_id for m in members}
     return DuplicateGroupDetailOut(
         id=group.id,
         full_hash=group.full_hash,
         size=group.size,
-        member_count=group.member_count,
-        reclaimable_bytes=group.reclaimable_bytes,
-        suggested_keeper_entry_id=group.suggested_keeper_entry_id,
-        suggested_keeper_reason=group.suggested_keeper_reason,
+        member_count=len(members),
+        reclaimable_bytes=visible_reclaimable,
+        suggested_keeper_entry_id=group.suggested_keeper_entry_id if keeper_visible else None,
+        suggested_keeper_reason=group.suggested_keeper_reason if keeper_visible else None,
         members=[DuplicateMemberOut.model_validate(m) for m in members],
     )

@@ -27,7 +27,9 @@ from fathom.backends.base import FsEntry, VolumeInfo
 ROOT = "/mnt/pool"
 
 
-def _entry(path: str, inode: int, *, size: int = 10, mtime: float = 1000.0) -> FsEntry:
+def _entry(
+    path: str, inode: int, *, size: int = 10, mtime: float = 1000.0, dev: int = 0
+) -> FsEntry:
     return FsEntry(
         path=path,
         name=path.rsplit("/", 1)[-1],
@@ -40,6 +42,7 @@ def _entry(path: str, inode: int, *, size: int = 10, mtime: float = 1000.0) -> F
         uid=0,
         gid=0,
         inode=inode,
+        dev=dev,
         flags={},
     )
 
@@ -84,8 +87,9 @@ async def _drain(feed_iter: AsyncIterator[ChangeEvent]) -> list[ChangeEvent]:
 
 
 async def test_restat_feed_create_modify_delete() -> None:
-    # Baseline: inode 1 (a) and inode 2 (b). Fresh walk: a modified (mtime), c new, b gone.
-    baseline = {1: (1000.0, f"{ROOT}/a"), 2: (1000.0, f"{ROOT}/b")}
+    # Baseline keyed on (dev, inode): inode 1 (a) and inode 2 (b). Fresh walk: a modified (mtime),
+    # c new, b gone.
+    baseline = {(0, 1): (1000.0, f"{ROOT}/a"), (0, 2): (1000.0, f"{ROOT}/b")}
     backend = _FakeBackend([_entry(f"{ROOT}/a", 1, mtime=2000.0), _entry(f"{ROOT}/c", 3)])
     feed = RestatFeed(backend, baseline)
     events = await _drain(feed.changes(ROOT))
@@ -94,11 +98,27 @@ async def test_restat_feed_create_modify_delete() -> None:
     assert by_inode[3].kind == "create"
     assert by_inode[2].kind == "delete"
     assert by_inode[2].path == f"{ROOT}/b"  # baseline path carried on the delete
+    assert by_inode[2].dev == 0  # the delete carries the baseline (dev, inode)
+
+
+async def test_restat_feed_keys_baseline_on_dev_inode_no_collapse() -> None:
+    # Two ZFS child datasets reuse inode 42 (different dev). The (dev, inode)-keyed baseline tracks
+    # the colliding pair as TWO slots: removing only the ds1 copy emits a DELETE for (dev=1, 42)
+    # alone, while ds2's (dev=2, 42) — still present on the fresh walk — emits nothing. Keyed on
+    # inode alone the pair would have collapsed into one slot and lost a copy.
+    baseline = {(1, 42): (1000.0, f"{ROOT}/ds1/x"), (2, 42): (1000.0, f"{ROOT}/ds2/x")}
+    backend = _FakeBackend([_entry(f"{ROOT}/ds2/x", 42, dev=2)])  # only ds2 still present
+    feed = RestatFeed(backend, baseline)
+    events = await _drain(feed.changes(ROOT))
+    deletes = [ev for ev in events if ev.kind == "delete"]
+    assert len(deletes) == 1
+    assert (deletes[0].dev, deletes[0].inode) == (1, 42)  # only the removed ds1 copy
+    assert deletes[0].path == f"{ROOT}/ds1/x"
 
 
 async def test_restat_feed_rename_is_cheap_path_modify() -> None:
-    # Same inode (1), new path → a MODIFY (cheap path update), not delete+create.
-    baseline = {1: (1000.0, f"{ROOT}/old")}
+    # Same (dev, inode), new path → a MODIFY (cheap path update), not delete+create.
+    baseline = {(0, 1): (1000.0, f"{ROOT}/old")}
     backend = _FakeBackend([_entry(f"{ROOT}/new", 1)])
     feed = RestatFeed(backend, baseline)
     events = await _drain(feed.changes(ROOT))
@@ -126,7 +146,8 @@ async def test_collect_delta_minimises_and_cancels() -> None:
     delta = await collect_delta(_Scripted(events), ROOT)
     upsert_inodes = {e.inode for e in delta.upserts}
     assert upsert_inodes == {2, 3}  # inode 1 cancelled; inode 2 re-added; inode 3 modified
-    assert delta.removed_inodes == []  # no net removals this cycle
+    assert delta.removed == []  # no net removals this cycle
+    assert delta.removed_inodes == []
 
 
 async def test_collect_delta_net_removal() -> None:
@@ -136,7 +157,22 @@ async def test_collect_delta_net_removal() -> None:
 
     delta = await collect_delta(_Scripted(), ROOT)
     assert delta.upserts == []
-    assert delta.removed_inodes == [9]
+    assert delta.removals == [(0, 9, f"{ROOT}/gone")]  # (dev, inode, path)
+    assert delta.removed == [(0, 9)]  # the precise (dev, inode) wire signal
+    assert delta.removed_inodes == [9]  # legacy inode-only view still works
+
+
+async def test_collect_delta_keys_removals_on_dev_inode() -> None:
+    # Two cross-dataset deletes share inode 42 (different dev). collect_delta dedups on
+    # (dev, inode), so BOTH removals survive — they don't collapse into one inode-keyed slot.
+    class _Scripted:
+        async def changes(self, root: str) -> AsyncIterator[ChangeEvent]:
+            yield ChangeEvent("delete", path=f"{ROOT}/ds1/x", inode=42, dev=1)
+            yield ChangeEvent("delete", path=f"{ROOT}/ds2/x", inode=42, dev=2)
+
+    delta = await collect_delta(_Scripted(), ROOT)
+    assert delta.removed == [(1, 42), (2, 42)]  # both kept, keyed on (dev, inode)
+    assert delta.removals == [(1, 42, f"{ROOT}/ds1/x"), (2, 42, f"{ROOT}/ds2/x")]
 
 
 async def test_zfs_diff_feed_parses_records() -> None:

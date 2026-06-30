@@ -23,14 +23,20 @@ from starlette.responses import Response
 # No unsafe-inline / unsafe-eval anywhere (frontend ADD §12). default-src 'self' keeps every
 # fetch/asset same-origin; img-src allows data: for ECharts-rendered raster/thumbnails; the
 # preview pane renders *derived* artifacts only (ADR-014), never raw bytes.
+#
+# Brand fonts (Fathomline): the Sora/Inter/JetBrains-Mono webfonts are loaded from Google Fonts, so
+# style-src additionally allows the stylesheet origin (fonts.googleapis.com) and font-src the font
+# file origin (fonts.gstatic.com). These are the ONLY third-party origins; everything else stays
+# 'self'. If you prefer a strictly self-only CSP, self-host the fonts and drop both origins (the SPA
+# falls back to system fonts regardless — see assets/brand/brand-tokens.css).
 _CSP = "; ".join(
     (
         "default-src 'self'",
         "base-uri 'self'",
         "script-src 'self'",
-        "style-src 'self'",
+        "style-src 'self' https://fonts.googleapis.com",
         "img-src 'self' data:",
-        "font-src 'self'",
+        "font-src 'self' https://fonts.gstatic.com",
         "connect-src 'self'",
         "frame-ancestors 'none'",
         "form-action 'self'",

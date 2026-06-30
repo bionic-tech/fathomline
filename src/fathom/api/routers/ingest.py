@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, status
 
-from fathom.api.deps import FingerprintDep, SessionDep
+from fathom.api.deps import FingerprintDep, SessionDep, SettingsDep
 from fathom.api.schemas import (
     AgentRunReport,
     AgentRunResult,
@@ -63,6 +63,7 @@ async def finalize_rollups(
 async def report_run(
     report: AgentRunReport,
     session: SessionDep,
+    settings: SettingsDep,
     fingerprint: FingerprintDep,
 ) -> AgentRunResult:
     """Record the calling agent's end-of-run outcome (fleet observability).
@@ -77,4 +78,10 @@ async def report_run(
     if run is None:
         # Unknown fingerprint: authenticated by the boundary but no host row yet (never ingested).
         return AgentRunResult(run_id=0, host_id=0, outcome="unknown_host")
+    # Release this host's scan lease (ADR-036): the run-report is the natural "scan done" signal,
+    # so the next heavy scan can proceed. Inert unless the coordinator is enabled.
+    if settings.scan_coordinator_enabled:
+        from fathom.core.scan_coordinator import release_lease
+
+        await release_lease(session, run.host_id)
     return AgentRunResult(run_id=run.id, host_id=run.host_id, outcome=run.outcome)

@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import httpx
 
+from fathom.auth.models import User
+from fathom.auth.passwords import hash_password
 from fathom.auth.principal import Role
+from fathom.auth.sessions import create_session
 from fathom.core import db
 from fathom.core.dedup_service import DedupScope, DedupService
 from tests.api.conftest import FINGERPRINT_HEADER, batch, seed_principal
@@ -201,8 +204,104 @@ async def test_duplicates_fully_out_of_scope_hidden(api_client: httpx.AsyncClien
     assert detail.status_code == 404  # existence not leaked
 
 
+async def test_duplicates_detail_aggregate_recomputed_over_visible_members(
+    api_client: httpx.AsyncClient,
+) -> None:
+    """EC-dedup-5b: /duplicates/{id} reports member_count/reclaimable over VISIBLE members only.
+
+    A cross-volume group with two copies on v1 and one on v2 has a whole-group member_count of 3
+    and reclaimable = size*(3-1). A viewer scoped to v1 sees two members, so the detail must report
+    member_count=2 and reclaimable=size*(2-1) — never a count of copies it cannot see — and a
+    suggested keeper, if surfaced, must be one of the visible members.
+    """
+    v1 = await _ingest_fullbit(
+        api_client,
+        mountpoint="/mnt/a",
+        entries=[
+            _entry("/mnt/a", "a", 50, size=100, full=_HA),
+            _entry("/mnt/a", "b", 51, size=100, full=_HA),
+        ],
+    )
+    await _ingest_fullbit(
+        api_client, mountpoint="/mnt/b", entries=[_entry("/mnt/b", "c", 52, size=100, full=_HA)]
+    )
+    await _build_groups()
+
+    # Admin sees the whole group: 3 members, reclaimable = 100*(3-1) = 200.
+    admin = await seed_principal()
+    gid = (await api_client.get("/api/v1/duplicates", headers=admin)).json()["items"][0]["id"]
+    full = (await api_client.get(f"/api/v1/duplicates/{gid}", headers=admin)).json()
+    assert full["member_count"] == 3
+    assert full["reclaimable_bytes"] == 200
+
+    # A viewer scoped to v1 sees only its two copies: member_count=2, reclaimable = 100*(2-1) = 100.
+    scoped = await seed_principal(
+        username="v1only", role=Role.VIEWER, scope_kind="volume", volume_id=v1
+    )
+    detail = (await api_client.get(f"/api/v1/duplicates/{gid}", headers=scoped)).json()
+    assert detail["member_count"] == 2
+    assert detail["reclaimable_bytes"] == 100
+    visible_ids = {m["entry_id"] for m in detail["members"]}
+    assert len(visible_ids) == 2
+    keeper = detail["suggested_keeper_entry_id"]
+    assert keeper is None or keeper in visible_ids  # never point at an unseeable copy
+
+
 async def test_duplicates_read_only_no_write_routes(api_client: httpx.AsyncClient) -> None:
     # The router exposes only GETs — POST/DELETE on the resource are not allowed (report-only).
     auth = await seed_principal()
     assert (await api_client.post("/api/v1/duplicates", headers=auth)).status_code == 405
     assert (await api_client.delete("/api/v1/duplicates/1", headers=auth)).status_code == 405
+
+
+async def _seed_grantless_principal(username: str = "no-dedup") -> dict[str, str]:
+    """A user with a valid session but NO role assignment → no capabilities at all.
+
+    Every human role confers VIEW_DEDUP (see the RBAC matrix / principal.py), so the only principal
+    that can LACK it holds no grant at all — the deny-by-default case where ``require(VIEW_DEDUP)``
+    rejects with 403 ('insufficient capability') before any query runs.
+    """
+    async with db.session_scope() as session:
+        user = User(
+            subject=username,
+            source="local",
+            display_name=username,
+            password_hash=hash_password("correct horse battery staple"),
+            is_active=True,
+        )
+        session.add(user)
+        await session.flush()
+        _row, raw = await create_session(session, user_id=user.id, ttl_seconds=3600)
+    return {"Authorization": f"Bearer {raw}"}
+
+
+async def test_duplicates_require_view_dedup_403(api_client: httpx.AsyncClient) -> None:
+    # EC-dedup-7: a principal lacking VIEW_DEDUP is denied EVERY duplicates route (deny-by-default),
+    # whether listing, summary, the provider scan, or a single group by id.
+    auth = await _seed_grantless_principal()
+    for path in (
+        "/api/v1/duplicates",
+        "/api/v1/duplicates/summary",
+        "/api/v1/duplicates/provider",
+        "/api/v1/duplicates/1",
+    ):
+        resp = await api_client.get(path, headers=auth)
+        assert resp.status_code == 403, f"{path} -> {resp.status_code}: {resp.text}"
+
+
+async def test_duplicates_list_param_bounds_422(api_client: httpx.AsyncClient) -> None:
+    # EC-dedup-9: the keyset/list query params are bounded — out-of-range values are 422, not
+    # silently clamped. Authenticated as admin so it is the param bound, not auth, that rejects.
+    auth = await seed_principal()
+    assert (await api_client.get("/api/v1/duplicates?limit=0", headers=auth)).status_code == 422
+    assert (await api_client.get("/api/v1/duplicates?limit=201", headers=auth)).status_code == 422
+    assert (await api_client.get("/api/v1/duplicates?cursor=-1", headers=auth)).status_code == 422
+    assert (await api_client.get("/api/v1/duplicates?volume_id=0", headers=auth)).status_code == 422
+
+
+async def test_duplicates_detail_non_int_id_422(api_client: httpx.AsyncClient) -> None:
+    # EC-dedup-9: a non-integer group id is a path-validation error (422), not a 404 — 'abc' falls
+    # through to /duplicates/{group_id} (the literal summary/provider segments are matched first).
+    auth = await seed_principal()
+    resp = await api_client.get("/api/v1/duplicates/abc", headers=auth)
+    assert resp.status_code == 422

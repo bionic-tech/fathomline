@@ -2,7 +2,7 @@
 # Distribution name = the product (Fathomline); the import package stays `fathom` (the engine
 # codename — see the private docs/branding/ note). Both are intentional.
 name = "fathomline"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fathomline — the storage-estate analyzer: scan every host, see where the bytes live, dedupe with confidence, reclaim safely"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -55,14 +55,15 @@ dependencies = [
     # backend modules so a deploy that uses no remote target pays only the install cost.
     "asyncssh>=2.14",
     "smbprotocol>=1.12",
+    "pgvector>=0.3",
 ]
 
 # NOTE(pre-publish): point these at the real public repo once the Bionic Technologies org +
 # final repo name exist (PUBLISHING.md step 2).
 [project.urls]
-Homepage = "https://github.com/bionic-technologies/fathomline"
-Repository = "https://github.com/bionic-technologies/fathomline"
-Issues = "https://github.com/bionic-technologies/fathomline/issues"
+Homepage = "https://github.com/bionic-tech/fathomline"
+Repository = "https://github.com/bionic-tech/fathomline"
+Issues = "https://github.com/bionic-tech/fathomline/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -137,6 +138,12 @@ disallow_untyped_defs = false
 # our own code (asyncssh is typed and needs no override).
 [[tool.mypy.overrides]]
 module = ["smbclient.*", "smbprotocol.*"]
+ignore_missing_imports = true
+
+# pgvector ships no py.typed marker (its SQLAlchemy ``Vector`` type is used for the optional
+# concierge semantic-search column, ADR-035 Phase 2). Standard ignore for an untyped third-party lib.
+[[tool.mypy.overrides]]
+module = ["pgvector.*"]
 ignore_missing_imports = true
 
 # Pillow (PIL) and Pygments are the preview renderers' decode libraries. They are installed ONLY

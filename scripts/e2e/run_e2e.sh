@@ -65,7 +65,19 @@ export FATHOM_REMEDIATION_SIGNING_KEY_ID=e2e-hmac-1
 export FATHOM_E2E_SIGNING_SECRET="e2e-harness-hmac-signing-secret-32bytes-minimum-abcdef"
 export FATHOM_INFERENCE_PROVIDER=ollama
 export FATHOM_INFERENCE_OLLAMA_URL="http://127.0.0.1:$MOCK_PORT"
+export FATHOM_INFERENCE_MODEL=e2e-mock
 export FATHOM_ORGANIZE_MODEL=e2e-mock
+# Concierge (ADR-035) is read-only NL Q&A over the catalogue; the mock Ollama narrates it
+# deterministically so the verifier can exercise the classify→query→narrate path offline.
+export FATHOM_CONCIERGE_ENABLED=true
+# Notification Center (ADR-031): default-OFF master gate. Armed so the seeded in-app notification is
+# visible via the bell read surface (the verifier asserts list + unread-count; the bell renders in
+# the SPA story). Read-only — listing/unread-count only; the harness never marks-read or fans out.
+export FATHOM_NOTIFICATIONS_ENABLED=true
+# Mark onboarding done so the first-run setup wizard (ADR-037 / P4) does NOT auto-pop its modal over
+# every page for the admin in this fresh-DB harness — it would overlay and fail the story content
+# assertions. The wizard's own behaviour is unit-tested in SetupWizardModal.test.tsx.
+export FATHOM_ONBOARDING_COMPLETED=true
 uv run uvicorn --factory fathom.api.app:create_app --host 127.0.0.1 --port "$PORT" \
   >"$OUT/api.log" 2>&1 &
 for i in $(seq 1 90); do

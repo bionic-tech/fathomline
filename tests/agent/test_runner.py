@@ -10,7 +10,7 @@ import pytest
 
 from fathom.agent.config import AgentConfig, RemoteBackendConfig
 from fathom.agent.reader.feed import ChangeEvent, ChangeFeed
-from fathom.agent.runner import run_agent
+from fathom.agent.runner import run_agent, scan_one_root_now
 from fathom.agent.staging.store import StagingStore
 from fathom.backends import BackendRegistry, PosixBackend, SftpBackend
 from fathom.backends.base import FsEntry, StorageBackend, VolumeInfo
@@ -218,6 +218,85 @@ async def test_run_agent_scans_remote_sftp_target(tmp_path: Path) -> None:
     assert remote_outcome.entries_seen == 3
     assert remote_outcome.error is None
     assert transport.listdir_calls  # re-stat walk was used (no content read)
+
+
+@pytest.mark.asyncio
+async def test_scan_one_root_now_scans_only_that_root(tmp_path: Path) -> None:
+    # Scan Now (P3): scan_one_root_now restricts the run to the single requested root even though
+    # the config has two scan_scope roots — reusing the full scan->stage->push pipeline.
+    data = tmp_path / "data"
+    data.mkdir()
+    _make_tree(data)  # 6 entries
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "x.txt").write_text("z")
+    config = _config(tmp_path, [str(data), str(other)])
+
+    summary = await scan_one_root_now(
+        config,
+        root=str(data),
+        mode="metadata",
+        staging_path=str(tmp_path / "staging.sqlite"),
+        operator="tester",
+        drain=_drain_all,
+        finalize=_finalize_noop,
+    )
+
+    assert [s.root for s in summary.scopes] == [str(data)]  # only the requested root
+    assert summary.entries_seen == 6
+    assert summary.failed_scopes == []
+    assert all(s.fullbit_hashed == 0 for s in summary.scopes)  # metadata mode → no full-bit
+
+
+@pytest.mark.asyncio
+async def test_scan_one_root_now_fullbit_mode_honours_fullbit_scope(tmp_path: Path) -> None:
+    # mode='fullbit' content-hashes when the root is in fullbit_scope; mode='metadata' never does,
+    # even for the same root (the mode gates the full-bit pass without widening the standing scope).
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "dup1.bin").write_bytes(b"D" * 4096)
+    (data / "dup2.bin").write_bytes(b"D" * 4096)  # identical → a same-size collision pair
+    config = AgentConfig.model_validate(
+        {
+            "host_id": "nas-1",
+            "ingest_url": "https://proxy:8443/api/v1/agents/ingest",
+            "client_cert_path": "/certs/client.crt",
+            "client_key_path": "/certs/client.key",
+            "server_ca_path": "/certs/fathom-ca.crt",
+            "scan_scope": [str(data)],
+            "fullbit_scope": [str(data)],
+            "throttle": {
+                "walk_concurrency": 2,
+                "hash_concurrency": 1,
+                "pause_when": {"load1_above": 1000.0, "iowait_above_percent": 100},
+                "resume_when": {"load1_below": 1.0},
+            },
+        }
+    )
+
+    fullbit = await scan_one_root_now(
+        config,
+        root=str(data),
+        mode="fullbit",
+        staging_path=str(tmp_path / "fb.sqlite"),
+        operator="tester",
+        drain=_drain_all,
+        finalize=_finalize_noop,
+    )
+    fb_scope = next(s for s in fullbit.scopes if s.root == str(data))
+    assert fb_scope.fullbit_hashed == 2  # the two identical files were content-hashed
+
+    meta = await scan_one_root_now(
+        config,
+        root=str(data),
+        mode="metadata",
+        staging_path=str(tmp_path / "meta.sqlite"),
+        operator="tester",
+        drain=_drain_all,
+        finalize=_finalize_noop,
+    )
+    meta_scope = next(s for s in meta.scopes if s.root == str(data))
+    assert meta_scope.fullbit_hashed == 0  # metadata mode suppresses full-bit despite fullbit_scope
 
 
 @pytest.mark.asyncio

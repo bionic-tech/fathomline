@@ -12,6 +12,7 @@ import { principalHas } from "../../auth/rbac";
 import { formatBytes, formatDate } from "../../lib/format";
 import { useUiStore } from "../../state/uiStore";
 import { QueryState } from "../common/QueryState";
+import { Tabs, type TabDef } from "../common/Tabs";
 
 // Friendlier labels for the two scan modes (the API uses the internal terms metadata/fullbit).
 const MODE_LABEL: Record<string, string> = { metadata: "Metadata (fast)", fullbit: "Deep — content fingerprint" };
@@ -103,14 +104,7 @@ export function Scans(): JSX.Element {
       {selectedVolumeId === null ? (
         <p className="fathom-muted">Select a volume from the top bar to see its scan history.</p>
       ) : (
-        <>
-          {canTrigger ? (
-            <section aria-label="Request a deep scan" className="fathom-card">
-              <h2 className="fathom-card-title">Request a deep scan (content fingerprint)</h2>
-              <FullBitRequestForm volumeId={selectedVolumeId} />
-            </section>
-          ) : null}
-
+        <ScansBody volumeId={selectedVolumeId} volumeLabel={volumeLabel} canTrigger={canTrigger}>
           <QueryState
             isLoading={scans.isLoading}
             isError={scans.isError}
@@ -148,8 +142,39 @@ export function Scans(): JSX.Element {
               </tbody>
             </table>
           </QueryState>
-        </>
+        </ScansBody>
       )}
     </section>
   );
+}
+
+// Operators get a tabbed layout — History (the snapshot table) by default, with the heavy deep-scan
+// request form tucked behind its own tab so it doesn't push the table below the fold. Read-only
+// viewers (no TRIGGER_FULLBIT_SCAN) just see the history table, no tabs.
+function ScansBody({
+  volumeId,
+  volumeLabel,
+  canTrigger,
+  children,
+}: {
+  volumeId: number;
+  volumeLabel: string;
+  canTrigger: boolean;
+  children: JSX.Element;
+}): JSX.Element {
+  if (!canTrigger) return children;
+  const tabs: TabDef[] = [
+    { id: "history", label: "History", content: children },
+    {
+      id: "deep",
+      label: "Deep scan",
+      content: (
+        <section aria-label="Request a deep scan" className="fathom-card">
+          <h2 className="fathom-card-title">Request a deep scan (content fingerprint)</h2>
+          <FullBitRequestForm volumeId={volumeId} />
+        </section>
+      ),
+    },
+  ];
+  return <Tabs tabs={tabs} ariaLabel={`Scan sections for ${volumeLabel}`} />;
 }

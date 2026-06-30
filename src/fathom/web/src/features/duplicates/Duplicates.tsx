@@ -14,11 +14,16 @@ import {
   useWhoAmI,
 } from "../../api/queries";
 import { principalHas } from "../../auth/rbac";
-import type { DuplicateGroupOut, ProviderDuplicateGroupOut } from "../../api/types";
+import type {
+  DuplicateGroupOut,
+  ProviderDuplicateGroupOut,
+  ProviderDuplicatesOut,
+} from "../../api/types";
 import { displayPath, formatBytes, formatBytesExact } from "../../lib/format";
 import { useNames } from "../../lib/names";
 import { useUiStore } from "../../state/uiStore";
 import { QueryState } from "../common/QueryState";
+import { Tabs, type TabDef } from "../common/Tabs";
 import { RemediationWizard } from "../remediation/RemediationWizard";
 
 function GroupMembers({ groupId }: { groupId: number }): JSX.Element {
@@ -177,24 +182,14 @@ function ProviderGroupRow({ group }: { group: ProviderDuplicateGroupOut }): JSX.
   );
 }
 
-function ProviderDuplicatesSection({
-  volumeId,
-  enabled,
-}: {
-  volumeId: number | null;
-  enabled: boolean;
-}): JSX.Element | null {
-  const provider = useProviderDuplicates(volumeId, enabled);
-  // Only surface the section once there's something to show — it's a cloud-only feature, so most
-  // estates without rclone remotes have nothing here and shouldn't see an empty table.
-  if (!provider.data || provider.data.items.length === 0) return null;
+function ProviderDuplicatesPanel({ data }: { data: ProviderDuplicatesOut }): JSX.Element {
   return (
-    <section aria-labelledby="cloud-dup-title" className="fathom-card" style={{ marginTop: "1.5rem" }}>
+    <section aria-labelledby="cloud-dup-title" className="fathom-card">
       <h2 id="cloud-dup-title">Cross-cloud duplicates</h2>
       <p className="fathom-muted">
         Identical objects per the storage <strong>provider&rsquo;s own hash</strong> (no download).
         Report-only — these never drive a reclaim (that needs a content-verified hash).
-        {provider.data.truncated ? " Showing the first results — narrow by volume to see more." : ""}
+        {data.truncated ? " Showing the first results — narrow by volume to see more." : ""}
       </p>
       <table className="fathom-table">
         <caption className="sr-only">Provider-hash duplicate groups</caption>
@@ -207,7 +202,7 @@ function ProviderDuplicatesSection({
           </tr>
         </thead>
         <tbody>
-          {provider.data.items.map((g) => (
+          {data.items.map((g) => (
             <ProviderGroupRow key={`${g.algo}:${g.provider_hash}:${g.size}`} group={g} />
           ))}
         </tbody>
@@ -225,6 +220,10 @@ export function Duplicates(): JSX.Element {
   const [cursor, setCursor] = useState<string | null>(null);
   const [reclaim, setReclaim] = useState<DuplicateGroupOut | null>(null);
   const dups = useDuplicates(selectedVolumeId, cursor, canView);
+  // Cross-cloud (provider-hash) duplicates are a cloud-only extra; fetch alongside so we only show
+  // the second tab when there's actually something there (most estates without rclone have none).
+  const provider = useProviderDuplicates(selectedVolumeId, canView);
+  const hasProvider = (provider.data?.items.length ?? 0) > 0;
 
   const totalReclaimable = (dups.data?.items ?? []).reduce(
     (sum, g) => sum + g.reclaimable_bytes,
@@ -242,19 +241,8 @@ export function Duplicates(): JSX.Element {
     );
   }
 
-  return (
-    <section aria-labelledby="dup-title" className="fathom-page">
-      <header className="fathom-page-head">
-        <h1 id="dup-title">Duplicates</h1>
-        <p className="fathom-muted">
-          Dedup report for {volumeLabel}. Reclaimable on this page:{" "}
-          <strong className="tabular-nums" title={formatBytesExact(totalReclaimable)}>
-            {formatBytes(totalReclaimable)}
-          </strong>
-          {canReclaim ? " — use Reclaim to quarantine the extra copies (MFA-gated)." : "."}
-        </p>
-      </header>
-
+  const contentPanel = (
+    <>
       <QueryState
         isLoading={dups.isLoading}
         isError={dups.isError}
@@ -303,8 +291,39 @@ export function Duplicates(): JSX.Element {
           Next page
         </button>
       </div>
+    </>
+  );
 
-      <ProviderDuplicatesSection volumeId={selectedVolumeId} enabled={canView} />
+  const tabs: TabDef[] = [
+    { id: "content", label: "Content duplicates", content: contentPanel },
+  ];
+  if (hasProvider && provider.data) {
+    tabs.push({
+      id: "cloud",
+      label: "Cross-cloud",
+      content: <ProviderDuplicatesPanel data={provider.data} />,
+    });
+  }
+
+  return (
+    <section aria-labelledby="dup-title" className="fathom-page">
+      <header className="fathom-page-head">
+        <h1 id="dup-title">Duplicates</h1>
+        <p className="fathom-muted">
+          Dedup report for {volumeLabel}. Reclaimable on this page:{" "}
+          <strong className="tabular-nums" title={formatBytesExact(totalReclaimable)}>
+            {formatBytes(totalReclaimable)}
+          </strong>
+          {canReclaim ? " — use Reclaim to quarantine the extra copies (MFA-gated)." : "."}
+        </p>
+      </header>
+
+      {/* Only tab when there's a cross-cloud section to show; otherwise keep the single table flat. */}
+      {tabs.length > 1 ? (
+        <Tabs tabs={tabs} ariaLabel="Duplicate report sections" />
+      ) : (
+        contentPanel
+      )}
     </section>
   );
 }

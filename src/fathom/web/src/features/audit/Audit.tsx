@@ -9,8 +9,10 @@ import { useState } from "react";
 import { useAudit, useWhoAmI } from "../../api/queries";
 import { principalHas } from "../../auth/rbac";
 import type { AuditRecordOut } from "../../api/types";
+import { semanticBadgeClass } from "../../lib/badge";
 import { formatDate } from "../../lib/format";
 import { QueryState } from "../common/QueryState";
+import { Tabs, type TabDef } from "../common/Tabs";
 
 function chainBroken(rows: AuditRecordOut[]): Set<number> {
   // Rows arrive newest-first or oldest-first depending on the server; we sort by id ascending
@@ -41,22 +43,8 @@ export function Audit(): JSX.Element {
   const rows = audit.data?.items ?? [];
   const broken = chainBroken(rows);
 
-  return (
-    <section aria-labelledby="audit-title" className="fathom-page">
-      <header className="fathom-page-head">
-        <h1 id="audit-title">Audit</h1>
-        <p className="fathom-muted">
-          Hash-chained, append-only action log. Every mutation is recorded with its before-state
-          and result.
-        </p>
-        {broken.size > 0 ? (
-          <p role="alert" className="fathom-inline-error">
-            Chain continuity check failed for {broken.size} row(s) on this page — verify
-            server-side.
-          </p>
-        ) : null}
-      </header>
-
+  const logPanel = (
+    <>
       <QueryState
         isLoading={audit.isLoading}
         isError={audit.isError}
@@ -84,13 +72,7 @@ export function Audit(): JSX.Element {
                 <td className="fathom-mono">{r.action}</td>
                 <td className="fathom-path">{r.target}</td>
                 <td>
-                  <span
-                    className={`fathom-badge ${
-                      r.result === "granted" ? "fathom-badge-online" : "fathom-badge-offline"
-                    }`}
-                  >
-                    {r.result}
-                  </span>
+                  <span className={`fathom-badge ${semanticBadgeClass(r.result)}`}>{r.result}</span>
                 </td>
                 <td className="fathom-hash" title={r.row_hash}>
                   {r.row_hash.slice(0, 12)}…
@@ -119,6 +101,54 @@ export function Audit(): JSX.Element {
           Next page
         </button>
       </div>
+    </>
+  );
+
+  const integrityPanel = (
+    <div className="fathom-card">
+      <h3 className="fathom-card-title">Tamper-evidence (hash chain)</h3>
+      <p className="fathom-muted">
+        Every record stores the hash of the one before it, so the log forms a chain: altering or
+        removing any past entry breaks every hash after it. The check below re-links the rows on this
+        page (<code>prev_hash[n]</code> must equal <code>row_hash[n-1]</code>) as a quick client-side
+        hint — the server remains authoritative on the full chain.
+      </p>
+      {broken.size > 0 ? (
+        <p role="alert" className="fathom-inline-error">
+          Chain continuity check failed for {broken.size} row(s) on this page — verify server-side.
+        </p>
+      ) : (
+        <p role="status" className="fathom-inline-ok">
+          {rows.length > 0
+            ? `Chain intact across all ${rows.length} row(s) on this page.`
+            : "No records on this page to verify."}
+        </p>
+      )}
+    </div>
+  );
+
+  const tabs: TabDef[] = [
+    { id: "log", label: "Log", content: logPanel },
+    { id: "integrity", label: "Integrity", content: integrityPanel },
+  ];
+
+  return (
+    <section aria-labelledby="audit-title" className="fathom-page">
+      <header className="fathom-page-head">
+        <h1 id="audit-title">Audit</h1>
+        <p className="fathom-muted">
+          Hash-chained, append-only action log. Every mutation is recorded with its before-state
+          and result.
+        </p>
+        {broken.size > 0 ? (
+          <p role="alert" className="fathom-inline-error">
+            Chain continuity check failed for {broken.size} row(s) on this page — see the Integrity
+            tab.
+          </p>
+        ) : null}
+      </header>
+
+      <Tabs tabs={tabs} ariaLabel="Audit sections" />
     </section>
   );
 }

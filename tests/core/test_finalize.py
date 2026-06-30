@@ -228,3 +228,62 @@ async def test_finalize_build_dedup_flag_disables_inline_grouping(session: Async
 
     result = await FinalizeService(session, build_dedup=False).finalize_host(cert_fingerprint="fp")
     assert result.dup_groups == 0
+
+
+async def test_finalize_snapshot_untouched_without_rollup_root(session: AsyncSession) -> None:
+    # EC-finalize-7: a stale volume whose scan produced NO entries yields no rollup root row, so
+    # _finalize_snapshot_stats has nothing to stamp — the open snapshot is left UNTOUCHED (finished
+    # stays NULL; the Scans Entries/On-disk columns keep their defaults), never closed with bogus 0.
+    host = await _seed_host(session, name="nas-1", fingerprint="fp")
+    vol = Volume(
+        host_id=host.id, mountpoint="/mnt/pool", fs_type="zfs", device="tank", transport="sata"
+    )
+    session.add(vol)
+    await session.flush()
+    snap = Snapshot(host_id=host.id, volume_id=vol.id, mode="metadata", started=_T0)
+    session.add(snap)
+    await session.flush()
+
+    result = await FinalizeService(session).finalize_host(cert_fingerprint="fp")
+    # The empty volume is still "stale" (a snapshot, no prior rollup) so finalize visited it, but
+    # there was nothing to roll up → no root rollup row written.
+    assert result.volume_ids == [vol.id]
+    assert result.rollup_rows == 0
+
+    refreshed = await session.get(Snapshot, snap.id)
+    assert refreshed is not None
+    assert refreshed.finished is None  # left open — not stamped finished
+    assert refreshed.total_size == 0 and refreshed.file_count == 0  # untouched defaults
+
+
+async def test_finalize_skips_dedup_rebuild_for_hashless_host(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # EC-finalize-6: the dedup rebuild is gated on the FINALIZING host's own hashes. In a mixed
+    # estate where ANOTHER host carries full hashes, a metadata-only host's routine finalize must
+    # NOT trigger the (estate-wide, expensive) DedupService.rebuild — the host-scoped gate is what
+    # stopped a metadata agent's finalize rebuilding ~140k groups and blowing the proxy timeout.
+    calls: list[str] = []
+
+    async def _spy_rebuild(self: object, *, scope: object, job_id: str) -> int:
+        calls.append(job_id)
+        return 0
+
+    monkeypatch.setattr("fathom.core.finalize.DedupService.rebuild", _spy_rebuild)
+
+    meta_host = await _seed_host(session, name="meta-host", fingerprint="fp-meta")
+    hash_host = await _seed_host(session, name="hash-host", fingerprint="fp-hash")
+    await _seed_volume_with_entries(session, host=meta_host, mount="/mnt/meta", snapshot_at=_T0)
+    hash_vol = await _seed_volume_with_entries(
+        session, host=hash_host, mount="/mnt/hash", snapshot_at=_T0
+    )
+    await _add_hashed_pair(session, hash_vol, hash_host)  # only the OTHER host carries hashes
+
+    result = await FinalizeService(session).finalize_host(cert_fingerprint="fp-meta")
+    assert calls == []  # the hashless host never triggered an estate rebuild
+    assert result.dup_groups == 0
+
+    # Positive control: finalizing the host that DOES carry hashes triggers exactly one rebuild —
+    # proving the spy is wired to the real call site (so the empty `calls` above is meaningful).
+    await FinalizeService(session).finalize_host(cert_fingerprint="fp-hash")
+    assert calls == ["finalize"]

@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 
 from fathom.api.app import create_app
 from fathom.core import db
-from fathom.core.catalogue.models import FsEntryRow
+from fathom.core.catalogue.models import FsEntryRow, Host
 from fathom.core.settings import Settings
 from tests.api.conftest import FINGERPRINT_HEADER, _entry, batch, seed_principal
 
@@ -178,6 +178,34 @@ async def test_ingest_is_idempotent(api_client: httpx.AsyncClient) -> None:
     assert len(paths) == len(set(paths))
 
 
+async def test_ingest_nonexistent_snapshot_id_is_422(api_client: httpx.AsyncClient) -> None:
+    """A snapshot_id that doesn't exist is refused (422) — _resolve_snapshot fails closed."""
+    resp = await api_client.post(
+        "/api/v1/agents/ingest", json=batch(snapshot_id=999_999), headers=FINGERPRINT_HEADER
+    )
+    assert resp.status_code == 422
+    assert "snapshot_id" in resp.json()["detail"]
+
+
+async def test_ingest_snapshot_id_from_other_volume_is_422(api_client: httpx.AsyncClient) -> None:
+    """A snapshot_id bound to a DIFFERENT volume (same host) is refused (422).
+
+    _resolve_snapshot ties a reused snapshot to its (host, volume); a batch on volume B that cites
+    volume A's snapshot must not graft entries onto A's snapshot (cross-volume confusion, AR-0012).
+    """
+    first = await api_client.post(
+        "/api/v1/agents/ingest", json=batch(mountpoint="/mnt/a"), headers=FINGERPRINT_HEADER
+    )
+    snap_a = first.json()["snapshot_id"]
+    resp = await api_client.post(
+        "/api/v1/agents/ingest",
+        json=batch(mountpoint="/mnt/b", snapshot_id=snap_a),
+        headers=FINGERPRINT_HEADER,
+    )
+    assert resp.status_code == 422
+    assert "snapshot_id" in resp.json()["detail"]
+
+
 async def test_ingest_same_inode_different_dev_are_distinct_rows(
     api_client: httpx.AsyncClient,
 ) -> None:
@@ -216,6 +244,66 @@ async def test_ingest_same_inode_different_dev_are_distinct_rows(
         )
     assert count == 2  # both inode-5 files survived; neither clobbered the other
     assert list(devs) == [64769, 64770]
+
+
+async def test_ingest_removed_keys_on_dev_inode(api_client: httpx.AsyncClient) -> None:
+    # The DELETE path keyed on (dev, inode): two cross-dataset files share inode 5 (each on its own
+    # ZFS child dataset, different st_dev). A removal carrying the precise (dev, inode) of one copy
+    # must flip ONLY that row — the other device's row stays present. Before the fix the inode-only
+    # removal flipped both and emitted a false DELETE for the survivor.
+    a = _entry("/mnt/pool", "dataset_a/file", 5, size=100)
+    a["dev"] = 64769
+    b = _entry("/mnt/pool", "dataset_b/file", 5, size=200)
+    b["dev"] = 64770
+    first = await api_client.post(
+        "/api/v1/agents/ingest", json=batch(entries=[a, b]), headers=FINGERPRINT_HEADER
+    )
+    assert first.status_code == 200, first.text
+    volume_id = first.json()["volume_id"]
+    snap = first.json()["snapshot_id"]
+    # Remove only the dev=64769 copy via the precise (dev, inode) wire signal.
+    delta = batch(entries=[], removed=[{"dev": 64769, "inode": 5}], snapshot_id=snap)
+    result = await api_client.post(
+        "/api/v1/agents/ingest", json=delta, headers=FINGERPRINT_HEADER
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["entries_removed"] == 1  # only the one device's row flipped
+    async with db.session_scope() as session:
+        rows = (
+            await session.execute(
+                select(FsEntryRow.dev, FsEntryRow.present)
+                .where(FsEntryRow.volume_id == volume_id, FsEntryRow.inode == 5)
+                .order_by(FsEntryRow.dev)
+            )
+        ).all()
+    present = {r.dev: r.present for r in rows}
+    assert present[64769] is False  # the removed copy
+    assert present[64770] is True  # the survivor untouched (the cross-dataset bug is fixed)
+
+
+async def test_ingest_legacy_removed_inodes_still_applies(api_client: httpx.AsyncClient) -> None:
+    # A pre-(dev,inode) agent sends only the legacy removed_inodes (no dev). The server carries
+    # those as (None, inode) and falls back to an inode-only match, so the removal still applies —
+    # the backward-compatible half of the wire change.
+    first = await api_client.post(
+        "/api/v1/agents/ingest", json=batch(), headers=FINGERPRINT_HEADER
+    )
+    assert first.status_code == 200, first.text
+    volume_id = first.json()["volume_id"]
+    snap = first.json()["snapshot_id"]
+    delta = batch(entries=[], removed_inodes=[3], snapshot_id=snap)  # movies/a.mkv, inode 3
+    result = await api_client.post(
+        "/api/v1/agents/ingest", json=delta, headers=FINGERPRINT_HEADER
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["entries_removed"] == 1
+    async with db.session_scope() as session:
+        row = (
+            await session.execute(
+                select(FsEntryRow).where(FsEntryRow.volume_id == volume_id, FsEntryRow.inode == 3)
+            )
+        ).scalar_one()
+    assert row.present is False
 
 
 async def test_ingest_persists_provider_hash_on_metadata_batch(
@@ -303,3 +391,70 @@ async def test_ingest_batch_too_large(api_client: httpx.AsyncClient, settings) -
         "/api/v1/agents/ingest", json=batch(entries=entries), headers=FINGERPRINT_HEADER
     )
     assert resp.status_code == 422
+
+
+async def test_ingest_snapshot_id_from_other_host_is_422(api_client: httpx.AsyncClient) -> None:
+    """A snapshot_id owned by a DIFFERENT host is refused (422) — EC-ingest-10.
+
+    ``_resolve_snapshot`` ties a reused snapshot to its (host, volume) by the *mTLS-verified* host
+    identity, never the body. Host A citing host B's snapshot_id cannot graft entries onto B's
+    snapshot — the host_id mismatch fails closed (cross-host confusion, AR-0012).
+    """
+    host_b = {"X-Client-Cert-Fingerprint": "99:88:77:66"}
+    first = await api_client.post(
+        "/api/v1/agents/ingest",
+        json=batch(host={"name": "host-b", "os": "TrueNAS", "agent_version": "0.1.0"}),
+        headers=host_b,
+    )
+    assert first.status_code == 200, first.text
+    snap_b = first.json()["snapshot_id"]
+    # Host A (the default fingerprint) cites host B's snapshot → host mismatch → 422.
+    resp = await api_client.post(
+        "/api/v1/agents/ingest", json=batch(snapshot_id=snap_b), headers=FINGERPRINT_HEADER
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "snapshot_id does not belong to this host/volume"
+
+
+async def test_ingest_pre_facts_batch_preserves_facts_and_config(
+    api_client: httpx.AsyncClient,
+) -> None:
+    """A later pre-facts batch must not null previously-known host facts/config (EC-ingest-13).
+
+    ``_upsert_host`` writes ``facts`` only when the agent reports them (ADR-037) and never touches
+    ``reported_config`` at all (that is mirrored from the run report, ADR-033). So a pre-facts
+    agent re-ingesting on the same fingerprint leaves the stored facts and mirrored config intact.
+    """
+    facts = {"cpu_cores": 8, "ram_bytes": 16_000_000_000, "gpu_name": "RTX 4090"}
+    first = await api_client.post(
+        "/api/v1/agents/ingest",
+        json=batch(
+            host={"name": "nas-1", "os": "TrueNAS", "agent_version": "0.1.0", "facts": facts}
+        ),
+        headers=FINGERPRINT_HEADER,
+    )
+    assert first.status_code == 200, first.text
+
+    # Establish a previously-mirrored agent config (ADR-033), as a run report would have.
+    fp = FINGERPRINT_HEADER["X-Client-Cert-Fingerprint"]
+    config = {"cross_mounts": True, "scan_scope": ["/mnt/pool"]}
+    async with db.session_scope() as session:
+        host = (
+            await session.execute(select(Host).where(Host.cert_fingerprint == fp))
+        ).scalar_one()
+        stored_facts = dict(host.facts)  # the model_dump the server persisted (with null fields)
+        host.reported_config = config
+
+    # A pre-facts agent (no facts in the batch) re-ingests on the same fingerprint.
+    second = await api_client.post(
+        "/api/v1/agents/ingest", json=batch(), headers=FINGERPRINT_HEADER
+    )
+    assert second.status_code == 200, second.text
+
+    async with db.session_scope() as session:
+        host = (
+            await session.execute(select(Host).where(Host.cert_fingerprint == fp))
+        ).scalar_one()
+    assert host.facts == stored_facts  # facts NOT nulled by the pre-facts batch
+    assert host.facts["cpu_cores"] == 8 and host.facts["gpu_name"] == "RTX 4090"
+    assert host.reported_config == config  # ingest never touches the mirrored config

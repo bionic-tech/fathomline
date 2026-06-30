@@ -58,6 +58,38 @@ async def test_create_fullbit_rejects_blank_ack(api_client: httpx.AsyncClient) -
     assert resp.status_code == 422  # too short to name a device class
 
 
+async def test_create_fullbit_scope_path_sets_target(api_client: httpx.AsyncClient) -> None:
+    # UC-scans-4: when a sub-tree scope_path is given, the persisted ack target is that PATH, not
+    # the whole-volume mountpoint — the audit trail records exactly what was acked for full-bit.
+    vol = await _seed_volume(api_client)
+    auth = await seed_principal(role=Role.OPERATOR)
+    scope_path = "/mnt/pool/movies"
+    resp = await api_client.post(
+        "/api/v1/scans/fullbit",
+        json={"volume_id": vol, "impact_ack": _ACK, "scope_path": scope_path},
+        headers=auth,
+    )
+    assert resp.status_code == 201, resp.text
+    async with db.session_scope() as session:
+        snap = await session.get(Snapshot, resp.json()["snapshot_id"])
+        assert snap is not None
+        assert snap.warning_ack["target"] == scope_path
+        volume = await session.get(Volume, vol)
+        assert volume is not None
+        assert snap.warning_ack["target"] != volume.mountpoint  # the sub-tree, not the mount
+
+
+async def test_create_fullbit_whitespace_ack_rejected(api_client: httpx.AsyncClient) -> None:
+    # EC-scans-16: an all-whitespace ack passes the schema's min_length=1 but the router strip()s it
+    # before the non-impact-contract length gate, so 8 spaces (strip → "") is refused (422).
+    vol = await _seed_volume(api_client)
+    auth = await seed_principal(role=Role.OPERATOR)
+    resp = await api_client.post(
+        "/api/v1/scans/fullbit", json={"volume_id": vol, "impact_ack": " " * 8}, headers=auth
+    )
+    assert resp.status_code == 422
+
+
 async def test_create_fullbit_viewer_denied(api_client: httpx.AsyncClient) -> None:
     vol = await _seed_volume(api_client)
     auth = await seed_principal(role=Role.VIEWER)  # viewer cannot trigger full-bit

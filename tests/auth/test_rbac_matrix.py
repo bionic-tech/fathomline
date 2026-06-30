@@ -93,3 +93,28 @@ def test_deny_by_default_no_grant() -> None:
     assert scope.is_empty is True
     with pytest.raises(HTTPException):
         scope.check_target(host_id=1)
+
+
+def test_multiple_grants_union_host_and_volume() -> None:
+    """(viewer, host A) + (viewer, volume V) unions host_ids and volume_ids (EC-rbac-18)."""
+    grants = (
+        Grant(role=Role.VIEWER, scope_kind="host", host_id=3),
+        Grant(role=Role.VIEWER, scope_kind="volume", volume_id=42),
+    )
+    scope = ScopeFilter.from_grants(grants, Capability.VIEW_METADATA)
+    assert scope.is_global is False
+    assert scope.host_ids == frozenset({3})
+    assert scope.volume_ids == frozenset({42})
+    scope.check_target(host_id=3, volume_id=999)  # reached via the host grant
+    scope.check_target(host_id=999, volume_id=42)  # reached via the volume grant
+
+
+def test_volume_grant_reaches_volume_regardless_of_host() -> None:
+    """A volume-scoped grant reaches exactly that volume under any host id (EC-rbac-28)."""
+    grants = (Grant(role=Role.VIEWER, scope_kind="volume", volume_id=7),)
+    scope = ScopeFilter.from_grants(grants, Capability.VIEW_METADATA)
+    for host_id in (1, 2, 999):
+        scope.check_target(host_id=host_id, volume_id=7)  # host-independent: always allowed
+    # No host is in scope, and a different volume is denied.
+    with pytest.raises(HTTPException):
+        scope.check_target(host_id=1, volume_id=8)

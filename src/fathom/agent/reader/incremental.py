@@ -94,8 +94,8 @@ class IncrementalScanner:
             )
         removals = 0
         if delta.removals:
-            # The feed carries the (inode, path) of each removal so the staged removal — and the
-            # server's DELETE churn row — records a real path, not just an inode.
+            # The feed carries the (dev, inode, path) of each removal so the staged removal — and
+            # the server's DELETE churn row — records a real path and flips only the right device.
             removals = await asyncio.to_thread(
                 self._staging.stage_removals,
                 run_id=run_id,

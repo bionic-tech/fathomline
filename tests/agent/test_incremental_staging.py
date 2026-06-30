@@ -1,10 +1,11 @@
 """Staging + push of incremental removals (incremental test_plan).
 
 Covers the agent staging/transport half of the incremental change feed:
-- ``stage_removals`` records explicit deletions keyed on (host, volume, inode), idempotently;
+- ``stage_removals`` records explicit deletions keyed on (host, volume, dev, inode), idempotently;
 - a delete-only cycle (no entries, only removals) still drains via ``pending_runs``;
-- ``PushClient.drain`` pushes the removals as a metadata batch carrying ``removed_inodes`` and
-  no entries, and marks them pushed only after acknowledgement (resumable, idempotent);
+- ``PushClient.drain`` pushes the removals as a metadata batch carrying the precise ``removed``
+  (dev, inode) pairs (plus legacy ``removed_inodes``) and no entries, and marks them pushed only
+  after acknowledgement (resumable, idempotent);
 - ``IncrementalScanner`` drives a feed into staging (upserts + removals), throttle-aware.
 """
 
@@ -88,11 +89,17 @@ def test_stage_removals_is_idempotent(tmp_path: Path) -> None:
             host_id=HOST, volume_id=VOL, mode="metadata", root=VOL, started_at=1.0, volume=_VOLUME
         )
         first = store.stage_removals(
-            run_id=run, host_id=HOST, volume_id=VOL, removals=[(3, f"{VOL}/a"), (4, f"{VOL}/b")]
+            run_id=run,
+            host_id=HOST,
+            volume_id=VOL,
+            removals=[(0, 3, f"{VOL}/a"), (0, 4, f"{VOL}/b")],
         )
         assert first == 2
-        # Re-staging the same inode re-attaches it (idempotent on the business key), not a 3rd row.
-        store.stage_removals(run_id=run, host_id=HOST, volume_id=VOL, removals=[(3, f"{VOL}/a")])
+        # Re-staging the same (dev, inode) re-attaches it (idempotent on the business key), not a
+        # 3rd row.
+        store.stage_removals(
+            run_id=run, host_id=HOST, volume_id=VOL, removals=[(0, 3, f"{VOL}/a")]
+        )
         rows = store.unpushed_removals_for_run(run, limit=10)
         assert sorted(r["inode"] for r in rows) == [3, 4]
 
@@ -102,7 +109,9 @@ async def test_delete_only_cycle_drains(tmp_path: Path) -> None:
         run = store.start_run(
             host_id=HOST, volume_id=VOL, mode="metadata", root=VOL, started_at=1.0, volume=_VOLUME
         )
-        store.stage_removals(run_id=run, host_id=HOST, volume_id=VOL, removals=[(7, f"{VOL}/gone")])
+        store.stage_removals(
+            run_id=run, host_id=HOST, volume_id=VOL, removals=[(0, 7, f"{VOL}/gone")]
+        )
         # No entries staged — only a removal. pending_runs must still surface this run.
         assert [r["id"] for r in store.pending_runs()] == [run]
 
@@ -116,7 +125,8 @@ async def test_delete_only_cycle_drains(tmp_path: Path) -> None:
 
         assert len(received) == 1
         assert received[0]["entries"] == []
-        assert received[0]["removed_inodes"] == [7]
+        assert received[0]["removed"] == [{"dev": 0, "inode": 7}]  # precise (dev, inode) signal
+        assert received[0]["removed_inodes"] == [7]  # legacy fallback still sent
         assert received[0]["mode"] == "metadata"
         # Marked pushed → a re-drain is a no-op (resumable/idempotent).
         assert store.unpushed_removals_for_run(run, limit=10) == []
@@ -130,7 +140,9 @@ async def test_drain_pushes_entries_then_removals(tmp_path: Path) -> None:
         store.stage_batch(
             run_id=run, host_id=HOST, volume_id=VOL, entries=[_entry(f"{VOL}/keep", 1)]
         )
-        store.stage_removals(run_id=run, host_id=HOST, volume_id=VOL, removals=[(2, f"{VOL}/gone")])
+        store.stage_removals(
+            run_id=run, host_id=HOST, volume_id=VOL, removals=[(0, 2, f"{VOL}/gone")]
+        )
         received: list[dict] = []
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(_handler(received)), base_url="https://core"
@@ -142,6 +154,7 @@ async def test_drain_pushes_entries_then_removals(tmp_path: Path) -> None:
         assert len(received) == 2
         assert received[0]["entries"] and received[0]["removed_inodes"] == []
         assert received[1]["entries"] == [] and received[1]["removed_inodes"] == [2]
+        assert received[1]["removed"] == [{"dev": 0, "inode": 2}]  # precise (dev, inode) signal
 
 
 class _FakeBackend:
@@ -205,3 +218,4 @@ async def test_incremental_scanner_stages_upserts_and_removals(tmp_path: Path) -
         removals = store.unpushed_removals_for_run(result.run_id, limit=10)
         assert [r["inode"] for r in removals] == [2]
         assert removals[0]["path"] == f"{VOL}/b"  # baseline path carried on the removal
+        assert removals[0]["dev"] == 0  # (dev, inode) staged from the feed's ChangeEvent.dev

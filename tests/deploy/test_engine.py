@@ -13,6 +13,7 @@ from fathom.core.deploy.engine import (
     HostDeployRequest,
     HostStatus,
 )
+from fathom.core.deploy.ssh import CommandResult
 from tests.deploy.fakes import FakeSshClient, FakeSshConnector, make_test_ca
 
 
@@ -300,3 +301,71 @@ def test_run_registry_never_evicts_incomplete_run() -> None:
     a.hosts[0].phase = DeployPhase.FAILED  # now complete → evictable on the next create
     reg.create(created_by="admin", hosts=[HostStatus(host_id="c", target="3")])
     assert reg.get(a.run_id) is None and reg.get(b.run_id) is not None
+
+
+class _PhaseRecordingClient(FakeSshClient):
+    """A fake client that snapshots the live ``HostStatus.phase`` on every SSH interaction.
+
+    The existing happy-path tests only assert the *terminal* phase. This double proves the engine
+    actually walks the documented orchestration order (connect → preflight → upload → start →
+    verify) rather than jumping straight to SUCCEEDED.
+    """
+
+    def __init__(self, status: HostStatus) -> None:
+        super().__init__()
+        self._status = status
+        self.phase_trace: list[DeployPhase] = []
+
+    async def run(self, command: str, *, sudo: bool = False) -> CommandResult:
+        self.phase_trace.append(self._status.phase)
+        return await super().run(command, sudo=sudo)
+
+    async def write_file(self, remote_path: str, content: bytes, *, mode: int = 0o644) -> None:
+        self.phase_trace.append(self._status.phase)
+        await super().write_file(remote_path, content, mode=mode)
+
+
+async def test_deploy_one_walks_phases_in_documented_order() -> None:
+    # Orchestration sequence guard: the engine drives the host through preflight → upload → start →
+    # verify (in that order) over the fake — not just into the SUCCEEDED end-state.
+    status = HostStatus(host_id="node-2", target="10.0.0.9")
+    client = _PhaseRecordingClient(status)
+    engine = DeployEngine(connector=FakeSshConnector(client=client), ca=_ca(), cert_days=10)
+
+    await engine.deploy_one(_request(), status)
+
+    assert status.phase is DeployPhase.SUCCEEDED
+    assert status.host_key is not None  # set right after a successful connect → CONNECTING ran
+    assert status.fingerprint is not None  # the cert was minted → MINTING ran
+    # Collapse consecutive duplicates (several SSH calls share a phase) to the ordered sequence of
+    # phases under which SSH work happened. MINTING does no SSH (it is a local CA call), so the
+    # observable SSH phases are exactly these four, in order.
+    observed: list[DeployPhase] = []
+    for phase in client.phase_trace:
+        if not observed or observed[-1] is not phase:
+            observed.append(phase)
+    assert observed == [
+        DeployPhase.PREFLIGHT,
+        DeployPhase.UPLOADING,
+        DeployPhase.STARTING,
+        DeployPhase.VERIFYING,
+    ]
+
+
+async def test_deploy_batch_mints_distinct_identity_per_host() -> None:
+    # A clean multi-host fan-out: every host reaches a terminal SUCCEEDED AND gets its OWN minted
+    # cert fingerprint (the agent's mTLS identity). The batch must never reuse one identity across
+    # hosts (the duplicate-target test proves both terminate; this proves per-host identities).
+    engine = DeployEngine(connector=FakeSshConnector(), ca=_ca(), cert_days=10, max_concurrent=3)
+    registry = DeployRunRegistry()
+    statuses = [HostStatus(host_id=f"node-{i}", target=f"10.0.0.{i}") for i in range(3)]
+    run = registry.create(created_by="admin", hosts=statuses)
+    requests = [_request(f"node-{i}", f"10.0.0.{i}") for i in range(3)]
+
+    await engine.deploy_batch(run, requests)
+
+    assert run.complete
+    assert all(h.phase is DeployPhase.SUCCEEDED for h in run.hosts)
+    fingerprints = {h.fingerprint for h in run.hosts}
+    assert len(fingerprints) == 3  # one distinct identity per host
+    assert all(fp is not None and len(fp) == 40 for fp in fingerprints)

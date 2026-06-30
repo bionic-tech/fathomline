@@ -17,10 +17,18 @@ const WINDOWS: { label: string; hours: number | null }[] = [
   { label: "All", hours: null },
 ];
 
-const TYPE_BADGE: Record<string, string> = {
-  created: "fathom-badge-online",
-  modified: "fathom-badge-metadata",
-  removed: "fathom-badge-offline",
+// Server-side row cap on the change feed. When the response fills this exactly the window almost
+// certainly overflowed it, so we surface a "may be truncated" hint (mirrors Duplicates / Reconcile).
+const LIMIT = 500;
+
+// The backend change feed emits create / modify / delete (incremental.CHANGE_TYPES). Map each to
+// its badge style + a friendlier past-tense label. EC-changes-20: the keys here used to be the
+// past-tense words (created/modified/removed), which matched NONE of the actual values, so every
+// row fell through to the default style and showed the raw verb — fixed by keying on real values.
+const TYPE_BADGE: Record<string, { cls: string; label: string }> = {
+  create: { cls: "fathom-badge-online", label: "created" },
+  modify: { cls: "fathom-badge-metadata", label: "modified" },
+  delete: { cls: "fathom-badge-offline", label: "removed" },
 };
 
 function SignedBytes({ delta }: { delta: number }): JSX.Element {
@@ -56,7 +64,7 @@ export function Changes(): JSX.Element {
   }, [winIdx]);
 
   const path = scopeToPath ? selectedPath : null;
-  const changes = useChanges(selectedVolumeId, path, since, 500);
+  const changes = useChanges(selectedVolumeId, path, since, LIMIT);
 
   const net = (changes.data ?? []).reduce((sum, c) => sum + c.size_delta, 0);
   const volumeLabel =
@@ -108,35 +116,45 @@ export function Changes(): JSX.Element {
             isEmpty={(changes.data?.length ?? 0) === 0}
             emptyLabel="No recorded changes in this window — churn appears after an incremental re-scan."
           >
-            <table className="fathom-table">
-              <caption className="sr-only">Change feed for {volumeLabel}</caption>
-              <thead>
-                <tr>
-                  <th scope="col">When</th>
-                  <th scope="col">Change</th>
-                  <th scope="col">Path</th>
-                  <th scope="col">Size Δ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(changes.data ?? []).map((c, i) => (
-                  <tr key={`${c.path}-${c.ts}-${i}`}>
-                    <td>{formatDate(c.ts)}</td>
-                    <td>
-                      <span
-                        className={`fathom-badge ${TYPE_BADGE[c.change_type] ?? "fathom-badge-role"}`}
-                      >
-                        {c.change_type}
-                      </span>
-                    </td>
-                    <td className="fathom-path">{c.path}</td>
-                    <td>
-                      <SignedBytes delta={c.size_delta} />
-                    </td>
+            <>
+              <table className="fathom-table">
+                <caption className="sr-only">Change feed for {volumeLabel}</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">When</th>
+                    <th scope="col">Change</th>
+                    <th scope="col">Path</th>
+                    <th scope="col">Size Δ</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {(changes.data ?? []).map((c, i) => {
+                    const badge = TYPE_BADGE[c.change_type] ?? {
+                      cls: "fathom-badge-role",
+                      label: c.change_type,
+                    };
+                    return (
+                      <tr key={`${c.path}-${c.ts}-${i}`}>
+                        <td>{formatDate(c.ts)}</td>
+                        <td>
+                          <span className={`fathom-badge ${badge.cls}`}>{badge.label}</span>
+                        </td>
+                        <td className="fathom-path">{c.path}</td>
+                        <td>
+                          <SignedBytes delta={c.size_delta} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {(changes.data?.length ?? 0) === LIMIT ? (
+                <p className="fathom-muted fathom-hint">
+                  Showing the first {LIMIT} changes — results may be truncated; narrow the window to
+                  see more.
+                </p>
+              ) : null}
+            </>
           </QueryState>
         </>
       )}

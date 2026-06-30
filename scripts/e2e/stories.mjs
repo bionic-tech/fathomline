@@ -182,6 +182,26 @@ await story("11-search-movie", async () => {
   await expectText("search-movie-results", "movie.bin", "movie.mkv"); // 3 hits across hosts
 });
 
+// Suitability / onboarding (ADR-037 / P4): Getting Started is now a FIRST-RUN MODAL, not a primary
+// nav page — the harness sets FATHOM_ONBOARDING_COMPLETED=true so it doesn't overlay the other
+// stories, which also retires the standalone nav link. The suitability assessment is covered by
+// verify.py's `suitability/assess` check, and the wizard modal + GettingStarted content by
+// SetupWizardModal.test.tsx / GettingStarted.test.tsx — so no standalone-page story is kept here.
+
+// Notification Center (ADR-031): the bell renders in the header (notifications_enabled is on for the
+// harness) with the seeded unread notification. Open the panel and assert the seeded title shows.
+await story("13-notifications-bell", async () => {
+  await page.locator('button[aria-label^="Notifications"]').first().click().catch(() => {});
+  await page.waitForTimeout(700);
+  await expectText("notifications-bell-panel", "Host nas-1 can run a larger local model");
+});
+
+// Deploy/enroll wizard (ADR-026): the page renders for an admin (deploy_agent); the deploy runtime is
+// not provisioned in the harness, so this captures the wizard's configured state (no SSH performed).
+await story("14-deploy", async () => {
+  await nav("/deploy");
+});
+
 await browser.close();
 
 // ---- write UI report + exit non-zero on any UI-assertion failure ------------------------------

@@ -16,7 +16,11 @@ export function TreePane({ volumeId, path, selectedPath, onOpen }: TreePaneProps
   const tree = useTree(volumeId, path);
   return (
     <nav aria-label="Directory tree" className="fathom-tree-pane">
-      {path && tree.data ? (
+      {tree.isError ? (
+        <p role="alert" className="fathom-inline-error">
+          Couldn't load the directory tree.
+        </p>
+      ) : path && tree.data ? (
         <DrillTree
           path={path}
           children={tree.data}

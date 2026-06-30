@@ -166,4 +166,19 @@ describe("Deploy page", () => {
     const deployBtn = screen.getByRole("button", { name: /deploy this host/i });
     expect(deployBtn).toBeDisabled(); // needsPin → disabled until a key is pinned
   });
+
+  it("auto-derives the agent path from the host path (deploy-wizard auto-derive, P2b)", async () => {
+    apiGet.mockImplementation((path: string) =>
+      path === "/auth/me" ? Promise.resolve(meWith("admin")) : Promise.resolve({}),
+    );
+    wrap(<Deploy />);
+    await screen.findByRole("tab", { name: /push/i });
+    fireEvent.change(screen.getByLabelText(/host path/i), {
+      target: { value: "/mnt/tank/" },
+    });
+    // Picking ONE host path fills the in-container agent path as /scan/<leaf> — no hand-kept prefix.
+    expect((screen.getByLabelText(/agent path/i) as HTMLInputElement).value).toBe(
+      "/scan/tank",
+    );
+  });
 });

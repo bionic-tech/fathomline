@@ -73,7 +73,21 @@ class _Handler(BaseHTTPRequestHandler):
         for msg in req.get("messages", []):
             if msg.get("role") == "user":
                 user = msg.get("content", "")
-        content = json.dumps(_proposal(user))
+        # Key the canned reply off the REQUESTED schema (Ollama structured outputs put the Pydantic
+        # JSON Schema in `format`), so one mock serves organize AND concierge deterministically:
+        #   - {assignments}            → organize proposal (by-extension grouping)
+        #   - {answer}                 → concierge NARRATE step (prose only)
+        #   - {tool, name_or_fragment} → concierge CLASSIFY step (find_file fallback)
+        fmt = req.get("format")
+        props = fmt.get("properties", {}) if isinstance(fmt, dict) else {}
+        if "answer" in props:
+            content = json.dumps({"answer": "Based on the catalogue, here is what I found."})
+        elif "tool" in props:
+            content = json.dumps(
+                {"tool": "find_file", "name_or_fragment": user[:80], "since_days": 7, "clarification": ""}
+            )
+        else:
+            content = json.dumps(_proposal(user))
         self._send(200, {"model": req.get("model", "e2e-mock"), "message": {"role": "assistant", "content": content}})
 
 

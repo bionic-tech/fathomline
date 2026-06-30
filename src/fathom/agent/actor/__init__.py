@@ -7,7 +7,14 @@ endpoint in v1 (AR-0003). It exists so the safety guards can be built and regres
 before any execute path is ever enabled (AR-0006, ADR-011).
 """
 
-from fathom.agent.actor.dispatch import ActorDispatcher, JobResult, plan_from_job
+from fathom.agent.actor.dispatch import (
+    ActorDispatcher,
+    JobResult,
+    RemediationUnavailableError,
+    ScanDispatcher,
+    ScanScopeError,
+    plan_from_job,
+)
 from fathom.agent.actor.executor import (
     BlastRadiusError,
     ExecOutcome,
@@ -26,6 +33,9 @@ __all__ = [
     "Executor",
     "JobResult",
     "RemediationDisabledError",
+    "RemediationUnavailableError",
+    "ScanDispatcher",
+    "ScanScopeError",
     "SignedJobListener",
     "VerifyReport",
     "dry_run_verify",

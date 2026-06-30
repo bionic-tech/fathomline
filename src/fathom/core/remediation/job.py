@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,6 +37,11 @@ class ActionJob(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    # Discriminator for the signed-job union (ADR-025). A model field ONLY — deliberately NOT part
+    # of canonical_bytes below, so adding it does not change the signed byte string of any existing
+    # remediation job (the signature contract is unchanged). Lets SignedJob tell this apart from a
+    # non-remediation ScanJob on the wire.
+    kind: Literal["remediation"] = "remediation"
     plan_id: str = Field(min_length=1)
     mode: JobMode
     nonce: str = Field(min_length=16)  # single-use; 128-bit+ CSPRNG hex
@@ -86,6 +91,61 @@ class ActionJob(BaseModel):
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
+    @property
+    def ledger_ref(self) -> str:
+        """A human label for this job on the single-use nonce ledger (the remediation plan id)."""
+        return self.plan_id
+
+
+class ScanJob(BaseModel):
+    """A scoped, time-boxed, single-use command to scan one root NOW (ADR-025 + Scan Now).
+
+    Unlike :class:`ActionJob` this touches no plan and moves nothing — it asks the agent to run a
+    metadata or full-bit scan of one of its configured scan roots immediately. It rides the same
+    signed-job channel (single-use ``nonce`` + ``issued_at``/``expires_at`` window + ``host_id``
+    scope), so the actor trusts it exactly as it trusts a remediation job: verify signature + nonce
+    + expiry + scope before doing anything. ``kind`` is the wire discriminator and IS part of the
+    signed bytes, so a scan job's signature can never be replayed as a remediation job (its
+    canonical bytes are structurally distinct AND explicitly typed).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["scan_now"] = "scan_now"
+    nonce: str = Field(min_length=16)  # single-use; 128-bit+ CSPRNG hex
+    issued_at: datetime
+    expires_at: datetime
+    host_id: str = Field(min_length=1)  # the one host this job may be dispatched to (scope)
+    root: str = Field(min_length=1)  # must be one of the agent's configured scan_scope roots
+    mode: Literal["metadata", "fullbit"]
+
+    def canonical_bytes(self) -> bytes:
+        """The stable, deterministic byte string the signature is computed over (T-3).
+
+        Includes ``kind`` so the signed bytes are unambiguously a scan command — a re-encoded or
+        cross-type job changes these bytes and invalidates the signature.
+        """
+        payload: dict[str, object] = {
+            "kind": self.kind,
+            "nonce": self.nonce,
+            "issued_at": self.issued_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
+            "host_id": self.host_id,
+            "root": self.root,
+            "mode": self.mode,
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    @property
+    def ledger_ref(self) -> str:
+        """A human label for this job on the single-use nonce ledger (scan + host + root)."""
+        return f"scan:{self.host_id}:{self.root}"
+
+
+# The signed-job union the channel carries — discriminated on ``kind`` so the agent parses exactly
+# the right shape (a remediation ActionJob or a Scan Now ScanJob) and verifies its own bytes.
+DispatchJob = Annotated[ActionJob | ScanJob, Field(discriminator="kind")]
+
 
 class SignedJob(BaseModel):
     """An :class:`ActionJob` plus its detached signature (base64) and key id (ADR-010).
@@ -96,7 +156,7 @@ class SignedJob(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    job: ActionJob
+    job: DispatchJob
     key_id: str = Field(min_length=1)
     algorithm: Literal["ed25519", "hmac-sha256"]
     signature: str = Field(min_length=1)  # base64-encoded

@@ -27,10 +27,10 @@ import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fathom.core.audit import AuditChain, AuditRecord
-from fathom.core.remediation.job import ActionJob, JobMode, SignedJob
+from fathom.core.remediation.job import ActionJob, JobMode, ScanJob, SignedJob
 from fathom.core.remediation.plan import (
     Member,
     PlanAction,
@@ -71,6 +71,15 @@ class ExecuteOutcome:
 
 
 ExecuteDispatch = Callable[[SignedJob], Awaitable[ExecuteOutcome]]
+
+# Scan Now (P3): the mode an operator may request and the (non-blocking) enqueue seam. Unlike the
+# remediation dispatch callables above — which block on the agent's correlated result — a scan is
+# fire-and-forget: ``enqueue`` puts the signed :class:`ScanJob` on the host's queue and returns at
+# once; the agent claims it on its next long-poll and reports the scan through the normal ingest
+# path (the job-result channel only models remediation dry_run/execute outcomes), so the operator
+# gets a prompt 202 while the scan runs out-of-band.
+ScanMode = Literal["metadata", "fullbit"]
+ScanEnqueue = Callable[[SignedJob], Awaitable[None]]
 
 
 class BlastCapExceededError(RuntimeError):
@@ -167,6 +176,50 @@ class RemediationOrchestrator:
             items=list(plan.items),
             move_root=plan.move_root,  # carried into the signed envelope for MOVE jobs (ADR-023)
         )
+
+    def _make_scan_job(self, *, host_id: str, root: str, mode: ScanMode) -> ScanJob:
+        issued = self._now()
+        return ScanJob(
+            nonce=secrets.token_hex(16),  # 128-bit single-use nonce
+            issued_at=issued,
+            expires_at=issued + timedelta(seconds=self._job_ttl),
+            host_id=host_id,
+            root=root,
+            mode=mode,
+        )
+
+    async def dispatch_scan(
+        self,
+        *,
+        created_by: str,
+        host_id: str,
+        root: str,
+        mode: ScanMode,
+        enqueue: ScanEnqueue,
+    ) -> str:
+        """Build + sign a :class:`ScanJob` and enqueue it for ``host_id`` (Scan Now, P3).
+
+        Non-destructive: this asks the agent to run a metadata/full-bit scan of one of its
+        configured scan roots NOW. It mirrors the remediation sign+dispatch pattern — same signer,
+        same single-use nonce + TTL window + host scope — but uses the **non-blocking** ``enqueue``
+        seam (the scan runs async on the agent and reports via ingest, not the result channel). The
+        intent is audited *before* dispatch (audit-before-act). Returns the job's nonce as an opaque
+        dispatch id for the operator's reference.
+        """
+        signed = sign_job(self._make_scan_job(host_id=host_id, root=root, mode=mode), self._signer)
+        self._audit.append(
+            actor=created_by,
+            action="scan.dispatch",
+            target=signed.job.ledger_ref,
+            before_state={"nonce": signed.job.nonce, "root": root, "mode": mode, "host": host_id},
+            result="enqueued",
+        )
+        await enqueue(signed)
+        _log.info(
+            "scan job dispatched",
+            extra={"host": host_id, "root": root, "mode": mode, "by": created_by},
+        )
+        return signed.job.nonce
 
     async def dry_run(
         self, plan: RemediationPlan, *, host_id: str, dispatch: DryRunDispatch

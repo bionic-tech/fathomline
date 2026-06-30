@@ -117,6 +117,24 @@ async def test_volume_info(fixture_tree: Path) -> None:
     assert info.mountpoint  # resolved
 
 
+def test_bus_from_syspath_classifies_usb_sata_and_unknown() -> None:
+    # The pure half of the transport classifier (drive-type tag): a /sys/block realpath whose chain
+    # crosses a usb* node is USB; an ata* node is SATA; a plain pci/virtio path is unknown.
+    bus = PosixBackend._bus_from_syspath
+    assert bus("/sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host6/sda") == "usb"
+    assert bus("/sys/devices/pci0000:00/0000:00:17.0/ata3/host2/target2:0:0/sdb") == "sata"
+    assert bus("/sys/devices/pci0000:00/0000:00:1f.2/virtio3/block/vda") == "unknown"
+
+
+def test_classify_transport_nvme_by_name_and_safe_fallbacks() -> None:
+    classify = PosixBackend._classify_transport
+    assert classify("/dev/nvme0n1p1") == "nvme"  # NVMe is unambiguous by name
+    # Network / ZFS-style devices don't map to a block bus → unknown (the fs_type carries those).
+    assert classify("tiger-1:/export/nextcloud") == "unknown"
+    assert classify("tank/Nextcloud") == "unknown"
+    assert classify("tmpfs") == "unknown"
+
+
 async def test_open_for_hash_reads_content(fixture_tree: Path) -> None:
     backend = PosixBackend()
     reader = await backend.open_for_hash(str(fixture_tree / "a.txt"))

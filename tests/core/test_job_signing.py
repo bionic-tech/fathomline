@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from fathom.core.remediation.job import ActionJob, SignedJob
+from fathom.core.remediation.job import ActionJob, ScanJob, SignedJob
 from fathom.core.remediation.nonce_store import InMemoryNonceStore
 from fathom.core.remediation.plan import PlanAction, PlanItem
 from fathom.core.remediation.signing import (
@@ -210,3 +210,114 @@ def test_signed_job_is_frozen_and_strict() -> None:
     assert isinstance(signed, SignedJob)
     with pytest.raises(ValueError, match=r"frozen|Instance is frozen"):
         signed.signature = "x"  # type: ignore[misc]
+
+
+# --- Scan Now jobs ride the same signed channel (ADR-025 + Scan Now) -----------------------------
+
+
+def _scan(
+    *, nonce: str = "0123456789abcdef0123", mode: str = "metadata", root: str = "/scan/data"
+) -> ScanJob:
+    now = datetime.now(tz=UTC)
+    return ScanJob(
+        nonce=nonce,
+        issued_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(seconds=300),
+        host_id=HOST,
+        root=root,
+        mode=mode,  # type: ignore[arg-type]
+    )
+
+
+async def test_scan_job_sign_and_verify_roundtrip() -> None:
+    signer, verifier = _ed_pair()
+    signed = sign_job(_scan(mode="fullbit"), signer)
+    job = await verify_job(
+        signed, verifier=verifier, nonce_store=InMemoryNonceStore(), expected_host_id=HOST
+    )
+    assert isinstance(job, ScanJob)
+    assert job.kind == "scan_now" and job.mode == "fullbit" and job.root == "/scan/data"
+
+
+async def test_scan_job_hmac_roundtrip() -> None:
+    signer = HmacSigner(b"k" * 32, key_id="hmac-1")
+    verifier = HmacVerifier(b"k" * 32, key_id="hmac-1")
+    signed = sign_job(_scan(), signer)
+    job = await verify_job(
+        signed, verifier=verifier, nonce_store=InMemoryNonceStore(), expected_host_id=HOST
+    )
+    assert isinstance(job, ScanJob)
+
+
+async def test_scan_job_tamper_rejected() -> None:
+    # Re-pointing the scan root after signing must invalidate the signature (T-3).
+    signer, verifier = _ed_pair()
+    signed = sign_job(_scan(root="/scan/data"), signer)
+    forged = signed.model_copy(update={"job": signed.job.model_copy(update={"root": "/scan/root"})})
+    with pytest.raises(JobVerificationError):
+        await verify_job(
+            forged, verifier=verifier, nonce_store=InMemoryNonceStore(), expected_host_id=HOST
+        )
+
+
+async def test_scan_job_expired_and_wrong_host_rejected() -> None:
+    signer, verifier = _ed_pair()
+    now = datetime.now(tz=UTC)
+    expired = ScanJob(
+        nonce="0123456789abcdef0123",
+        issued_at=now - timedelta(seconds=600),
+        expires_at=now - timedelta(seconds=1),
+        host_id=HOST,
+        root="/scan/data",
+        mode="metadata",
+    )
+    with pytest.raises(JobVerificationError, match="expired"):
+        await verify_job(
+            sign_job(expired, signer),
+            verifier=verifier,
+            nonce_store=InMemoryNonceStore(),
+            expected_host_id=HOST,
+        )
+    with pytest.raises(JobVerificationError, match="host scope"):
+        await verify_job(
+            sign_job(_scan(), signer),
+            verifier=verifier,
+            nonce_store=InMemoryNonceStore(),
+            expected_host_id="other-host",
+        )
+
+
+async def test_scan_job_nonce_is_single_use() -> None:
+    signer, verifier = _ed_pair()
+    store = InMemoryNonceStore()
+    signed = sign_job(_scan(), signer)
+    await verify_job(signed, verifier=verifier, nonce_store=store, expected_host_id=HOST)
+    with pytest.raises(NonceReuseError):
+        await verify_job(signed, verifier=verifier, nonce_store=store, expected_host_id=HOST)
+
+
+def test_scan_and_action_jobs_never_share_signed_bytes() -> None:
+    # The signed bytes differ by kind, so a scan-job signature can NEVER authorize a remediation
+    # job (or vice versa) even if the overlapping fields matched.
+    scan = _scan()
+    action = _job()
+    assert scan.canonical_bytes() != action.canonical_bytes()
+    signer, verifier = _ed_pair()
+    signed_scan = sign_job(scan, signer)
+    # Paste the scan signature onto an ActionJob envelope → must fail verification.
+    forged = SignedJob(
+        job=action,
+        key_id=signed_scan.key_id,
+        algorithm=signed_scan.algorithm,
+        signature=signed_scan.signature,
+    )
+    assert verifier.verify_signature(forged) is False
+
+
+def test_signed_job_union_discriminates_by_kind() -> None:
+    # Over the wire, SignedJob parses to the right job shape via the ``kind`` discriminator.
+    signer, _ = _ed_pair()
+    parsed_scan = SignedJob.model_validate_json(sign_job(_scan(), signer).model_dump_json())
+    assert isinstance(parsed_scan.job, ScanJob)
+    parsed_action = SignedJob.model_validate_json(sign_job(_job(), signer).model_dump_json())
+    assert isinstance(parsed_action.job, ActionJob)

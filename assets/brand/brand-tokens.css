@@ -1,0 +1,31 @@
+/*
+ * Fathomline — canonical brand tokens (Depth Scale palette + type).
+ * Fathomline is by Bionic Technologies. Built on the Fathom engine.
+ *
+ * THIS FILE IS THE SINGLE SOURCE OF TRUTH for the brand colours + font stacks.
+ * The SPA mirrors these in src/fathom/web/src/index.css (:root) and references them by name in
+ * src/fathom/web/tailwind.config.ts — keep the three in sync. Any docs site should @import this.
+ *
+ * NOTE: the SPA ships a strict Content-Security-Policy. For the Google webfonts below to actually
+ * load, the CSP must allow `https://fonts.googleapis.com` (style-src) and `https://fonts.gstatic.com`
+ * (font-src). Without that, the font-family fallbacks below render instead — the layout is unaffected.
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap");
+
+:root {
+  /* Depth Scale palette */
+  --abyss-navy: #0b1f33; /* primary background */
+  --trench-black: #05101f; /* deepest background */
+  --abyssal-blue: #13375c;
+  --sounding-blue: #0a52a0; /* primary accent / links */
+  --sounding-teal: #2bb3a3; /* secondary accent */
+  --shoal-teal: #9fd9d6;
+  --plummet-amber: #e2a33a; /* rare highlight — use sparingly, one accent at a time */
+  --steel: #c8d1da; /* neutral text on dark */
+
+  /* Type — Sora SemiBold headings, Inter body, JetBrains Mono code (with safe fallbacks) */
+  --font-heading: "Sora", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", "Cascadia Code", monospace;
+}

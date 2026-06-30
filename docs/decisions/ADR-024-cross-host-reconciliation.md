@@ -59,3 +59,26 @@ out-of-band copy).
 ### Risks
 - A huge tree comparison is a heavy DB aggregation → bounded by the same scope/▼ root confinement and
   a result cap (counts are exact server-side; the item list is sampled and marked truncated).
+
+## 2026-06-23 addendum — size guard + timeout for whole-pool comparisons
+
+The original "result cap" only bounded the returned **item list** (`MAX_ITEMS`); the **counts** still
+joined both trees in full. In the field, comparing two whole pools (nas-1 `/scan/tank`
+≈4.9M files vs ctu `/scan/data` ≈1.7M) joined both sides on the computed, **un-indexed** relative
+path — an O(files-per-side) merge/hash join run four times (matched group-by + two anti-joins +
+sample) — and with `statement_timeout = 0` it ground for minutes and looked broken.
+
+Two guards, both additive (no schema change), make it responsive and steer correct usage (reconcile
+matches by RELATIVE path, so it is for two copies of the *same* folder, not two whole pools):
+
+- **Size guard.** Before the heavy join, each side is counted with an early `LIMIT cap+1` (bounded
+  work however huge the tree). If either root holds more than `MAX_SIDE_ENTRIES` (default 2,000,000)
+  the service raises `ReconcileTooLargeError` and the route returns **413** with an actionable
+  message — narrow each side to the matching subfolder (e.g. `.../Media` vs `.../Media`).
+- **Timeout backstop.** A best-effort per-transaction `SET LOCAL statement_timeout`
+  (`COMPARE_TIMEOUT_SECONDS`, default 60s; PostgreSQL only, no-op on SQLite) caps the comparison's
+  DB time; a cancellation surfaces as `ReconcileTimeoutError` → **504** with the same guidance.
+
+A genuinely large but *matching* comparison (≤ the cap) still runs and is protected by the timeout.
+A future optimisation (materialise each side once into an indexed temp relation, so the four passes
+don't re-scan + re-`substr` millions of rows) would let the cap rise; not needed for correct usage.

@@ -126,3 +126,24 @@ async def test_iter_variant_yields_groups_one_at_a_time(session: AsyncSession) -
     assert {m.entry_id for m in seen[0].members} == {1, 2}
     # Empty scope short-circuits the generator (yields nothing).
     assert [g async for g in iter_provider_hash_duplicates(session, volume_ids=[])] == []
+
+
+async def test_same_hash_distinct_sizes_form_two_groups(session: AsyncSession) -> None:
+    # EC-dedup-15: the SAME provider hash at two DIFFERENT sizes yields two SEPARATE groups —
+    # grouping keys on (algo, hash, size), so a (vanishingly unlikely) cross-size hash collision can
+    # never merge files of different sizes into one group (mirrors the BLAKE3 path).
+    await _seed_volume(session, 1)
+    phash = "x" * 32
+    session.add(_entry(1, 1, "/a", 100, algo="md5", phash=phash))
+    session.add(_entry(2, 1, "/b", 100, algo="md5", phash=phash))
+    session.add(_entry(3, 1, "/c", 200, algo="md5", phash=phash))
+    session.add(_entry(4, 1, "/d", 200, algo="md5", phash=phash))
+    await session.flush()
+
+    groups = await find_provider_hash_duplicates(session)
+    assert len(groups) == 2
+    by_size = {g.size: g for g in groups}
+    assert set(by_size) == {100, 200}
+    assert {m.entry_id for m in by_size[100].members} == {1, 2}
+    assert {m.entry_id for m in by_size[200].members} == {3, 4}
+    assert all(g.provider_hash == phash and g.algo == "md5" for g in groups)

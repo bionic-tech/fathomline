@@ -2,6 +2,28 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Fathomline brand tokens — Depth Scale palette + type. CANONICAL SOURCE:
+ * assets/brand/brand-tokens.css (kept in sync here so the SPA has the variables at runtime; the
+ * font webfonts themselves are loaded from index.html via Google Fonts, CSP permitting). Tailwind
+ * exposes these as named colours (see tailwind.config.ts) so utilities and the shell draw from one
+ * place. The existing fathom-* shell palette is retained; new brand work should prefer these tokens.
+ */
+:root {
+  --abyss-navy: #0b1f33;
+  --trench-black: #05101f;
+  --abyssal-blue: #13375c;
+  --sounding-blue: #0a52a0;
+  --sounding-teal: #2bb3a3;
+  --shoal-teal: #9fd9d6;
+  --plummet-amber: #e2a33a;
+  --steel: #c8d1da;
+
+  --font-heading: "Sora", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", "Cascadia Code", monospace;
+}
+
 /* Base shell colours (the dark estate palette from tailwind.config.ts). The components below
    reference bespoke `fathom-*` class names; without these definitions Tailwind has nothing to
    emit for them and the app renders as unstyled plain text — these @layer components rules are
@@ -14,9 +36,28 @@
   }
   body {
     @apply bg-fathom-bg text-slate-100 antialiased;
+    font-family: var(--font-body);
+  }
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-heading);
+  }
+  code,
+  pre,
+  kbd,
+  samp {
+    font-family: var(--font-mono);
   }
   a {
     @apply text-fathom-accent no-underline hover:underline;
+  }
+  /* Placeholders + helper text were near-invisible (browser default ~slate-600); lift to AA. */
+  ::placeholder {
+    @apply text-slate-400 opacity-100;
   }
 }
 
@@ -83,7 +124,7 @@
     @apply truncate text-slate-200;
   }
   .fathom-tree-size {
-    @apply shrink-0 tabular-nums text-slate-400;
+    @apply shrink-0 tabular-nums text-slate-300;
   }
   .fathom-listing-pane table {
     @apply w-full border-collapse text-sm;
@@ -140,7 +181,7 @@
     @apply grid gap-1;
   }
   .fathom-muted {
-    @apply text-sm text-slate-400;
+    @apply text-sm text-slate-300;
   }
   .fathom-card {
     @apply grid gap-3 rounded-lg border border-white/10 bg-fathom-panel p-4;
@@ -148,6 +189,24 @@
   .fathom-card-title {
     @apply text-base font-semibold text-white;
   }
+  /* Tab set (features/common/Tabs.tsx) ------------------------------------------------- */
+  .fathom-tabset {
+    @apply grid gap-4;
+  }
+  .fathom-tablist {
+    @apply flex flex-wrap gap-1 border-b border-white/10;
+  }
+  .fathom-tab {
+    @apply -mb-px rounded-t border border-transparent border-b-2 px-3 py-1.5 text-sm font-medium text-slate-300 hover:bg-white/5 hover:text-white;
+  }
+  /* Single active treatment: the accent underline (no competing background tint). */
+  .fathom-tab-active {
+    @apply border-b-fathom-accent text-white;
+  }
+  .fathom-tab[aria-selected="true"] {
+    @apply border-b-fathom-accent text-white;
+  }
+
   /* Deploy wizard (ADR-026) ----------------------------------------------------------- */
   .fathom-tabs {
     @apply flex gap-2;
@@ -209,7 +268,7 @@
     grid-template-columns: max-content 1fr;
   }
   .fathom-deflist dt {
-    @apply text-slate-400;
+    @apply text-slate-300;
   }
   .fathom-deflist dd {
     @apply text-slate-200;
@@ -250,7 +309,7 @@
     @apply flex gap-2;
   }
   .fathom-btn {
-    @apply rounded border border-white/10 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-white/5 hover:text-white disabled:cursor-not-allowed disabled:opacity-50;
+    @apply rounded border border-white/10 px-3 py-1.5 text-sm font-medium text-slate-200 hover:bg-white/5 hover:text-white disabled:cursor-not-allowed disabled:border-white/5 disabled:bg-transparent disabled:text-slate-500 disabled:hover:bg-transparent;
   }
   .fathom-btn-primary {
     @apply border-transparent bg-fathom-accent text-fathom-bg hover:brightness-110;
@@ -277,10 +336,10 @@
     @apply text-2xl font-semibold text-white;
   }
   .fathom-kpi-label {
-    @apply mt-1 text-xs uppercase tracking-wide text-slate-400;
+    @apply mt-1 text-xs uppercase tracking-wide text-slate-300;
   }
   .fathom-kpi-sub {
-    @apply mt-0.5 truncate text-xs text-slate-500;
+    @apply mt-0.5 truncate text-xs text-slate-400;
   }
   /* A KPI that's clickable (opens the inventory modal): bare full-width button wrapping a .fathom-kpi. */
   .fathom-kpi-button {
@@ -306,6 +365,27 @@
   .fathom-explainer p {
     @apply mt-2;
   }
+  /* Collapsible "Advanced" settings disclosure (e.g. external secret-backend references). */
+  .fathom-advanced {
+    @apply mt-3;
+  }
+  .fathom-advanced summary {
+    @apply cursor-pointer text-sm font-medium text-slate-400 hover:text-slate-200;
+  }
+  /* TOTP enrolment steps. */
+  .fathom-mfa-setup {
+    @apply mt-3;
+  }
+  .fathom-steps {
+    @apply ml-5 list-decimal space-y-2 text-sm text-slate-200;
+  }
+  .fathom-steps .fathom-form-inline {
+    @apply mt-1;
+  }
+  /* QR code sits on a white plate so it scans on any theme. */
+  .fathom-qr {
+    @apply mt-2 inline-block rounded-md bg-white p-3;
+  }
 
   /* Card head + view toggle + toolbar ------------------------------------------------- */
   .fathom-card-head {
@@ -321,7 +401,7 @@
     @apply flex flex-wrap items-end gap-3;
   }
   .fathom-inline-field {
-    @apply grid gap-1 text-xs font-medium text-slate-400;
+    @apply grid gap-1 text-xs font-medium text-slate-300;
   }
   .fathom-inline-field select {
     @apply rounded border border-white/10 bg-fathom-bg px-2 py-1 text-sm text-slate-100 outline-none focus:border-fathom-accent;
@@ -344,7 +424,7 @@
     @apply w-full max-w-xl rounded border border-white/10 bg-fathom-bg px-3 py-2 text-slate-100 outline-none focus:border-fathom-accent focus:ring-1 focus:ring-fathom-accent;
   }
   .fathom-hint {
-    @apply text-xs;
+    @apply text-xs text-slate-400;
   }
 
   /* Breadcrumbs ----------------------------------------------------------------------- */
@@ -358,7 +438,7 @@
     @apply px-1 font-semibold text-slate-200;
   }
   .fathom-crumb-sep {
-    @apply px-0.5 text-slate-600;
+    @apply px-0.5 text-slate-500;
   }
 
   /* Listing: sortable headers + drill names ------------------------------------------- */
@@ -386,7 +466,7 @@
     @apply flex justify-end gap-2;
   }
   .fathom-wizard-steps {
-    @apply flex gap-2 text-xs text-slate-500;
+    @apply flex gap-2 text-xs text-slate-400;
   }
   .fathom-wizard-steps li {
     @apply rounded bg-white/5 px-2 py-1;
@@ -421,6 +501,23 @@
   .fathom-badge-metadata {
     @apply bg-sky-500/15 text-sky-300;
   }
+  /* Drive-type tags (driveType.ts): network = cyan, cloud = violet, removable/USB = amber, local =
+     neutral, unknown = muted — so a network or removable drive jumps out when picking/viewing scope. */
+  .fathom-badge-drive-network {
+    @apply bg-cyan-500/15 text-cyan-300;
+  }
+  .fathom-badge-drive-cloud {
+    @apply bg-violet-500/15 text-violet-300;
+  }
+  .fathom-badge-drive-removable {
+    @apply bg-amber-500/15 text-amber-300;
+  }
+  .fathom-badge-drive-local {
+    @apply bg-white/10 text-slate-300;
+  }
+  .fathom-badge-drive-unknown {
+    @apply bg-white/5 text-slate-500;
+  }
   /* Risk classes (riskClass.ts): OS = red, service data = orange, config/compose = yellow. */
   .fathom-badge-risk-os {
     @apply bg-red-600/20 text-red-300 ring-1 ring-red-500/40;
@@ -436,6 +533,77 @@
   }
   .fathom-badge-flag {
     @apply bg-violet-500/15 text-violet-300;
+  }
+
+  /* Semantic badge tokens (success / info / warning / danger / neutral) — colour always means
+     the same thing across pages (charts share these hues via the semantic Tailwind colours). */
+  .fathom-badge-success {
+    @apply bg-emerald-500/15 text-emerald-300;
+  }
+  .fathom-badge-info {
+    @apply bg-sky-500/15 text-sky-300;
+  }
+  .fathom-badge-warning {
+    @apply bg-amber-500/15 text-amber-300;
+  }
+  .fathom-badge-danger {
+    @apply bg-fathom-danger/15 text-fathom-danger;
+  }
+  .fathom-badge-neutral {
+    @apply bg-slate-500/20 text-slate-300;
+  }
+
+  /* Notification bell (ADR-031) ------------------------------------------------------- */
+  .fathom-bell {
+    @apply relative inline-block;
+  }
+  .fathom-bell-button {
+    @apply relative rounded px-2 py-1 text-lg leading-none hover:bg-slate-700/50;
+  }
+  .fathom-bell-badge {
+    @apply absolute -right-1 -top-1 rounded-full bg-red-600 px-1 text-[10px] font-semibold text-white;
+  }
+  .fathom-bell-panel {
+    @apply absolute right-0 z-50 mt-1 max-h-[70vh] w-96 overflow-auto rounded border border-slate-700 bg-slate-900 p-3 shadow-xl;
+  }
+  .fathom-bell-panel-head {
+    @apply mb-2 flex items-center justify-between;
+  }
+  .fathom-bell-empty {
+    @apply py-4 text-center text-sm text-slate-300;
+  }
+  .fathom-bell-list {
+    @apply flex flex-col gap-2;
+  }
+  .fathom-note {
+    @apply rounded border-l-4 bg-slate-800/60 p-2 text-sm;
+  }
+  .fathom-note-info {
+    @apply border-sky-500;
+  }
+  .fathom-note-warning {
+    @apply border-amber-500;
+  }
+  .fathom-note-critical {
+    @apply border-red-500;
+  }
+  .fathom-note-read {
+    @apply opacity-60;
+  }
+  .fathom-note-row {
+    @apply flex items-center justify-between text-xs text-slate-300;
+  }
+  .fathom-note-cat {
+    @apply uppercase tracking-wide;
+  }
+  .fathom-note-title {
+    @apply font-semibold text-slate-100;
+  }
+  .fathom-note-body {
+    @apply text-slate-300;
+  }
+  .fathom-note-dismiss {
+    @apply mt-1 text-xs text-fathom-accent hover:underline;
   }
 
   /* Explorer detail pane -------------------------------------------------------------- */
@@ -471,7 +639,7 @@
     grid-template-columns: max-content 1fr;
   }
   .fathom-keyvals dt {
-    @apply font-semibold text-slate-400;
+    @apply font-semibold text-slate-300;
   }
   .fathom-keyvals dd {
     @apply text-slate-200;
@@ -514,4 +682,179 @@
   display: grid;
   grid-template-columns: minmax(220px, 1fr) 2fr minmax(240px, 1fr);
   gap: 0.5rem;
+}
+
+/* AI concierge (ADR-035): answer card, citation list, inline link-style buttons. */
+.fathom-answer {
+  font-size: 1.05rem;
+  line-height: 1.5;
+  margin: 0 0 0.75rem;
+  white-space: pre-wrap;
+}
+.fathom-card-subhead {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fathom-muted, #8a93a6);
+  margin: 0.5rem 0 0.25rem;
+}
+.fathom-citations {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+.fathom-citations li {
+  margin: 0.15rem 0;
+}
+.fathom-linkbtn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--fathom-accent, #5b9dd9);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+.fathom-linkbtn:hover {
+  text-decoration: none;
+}
+
+/* Concierge floating widget (ADR-035): bottom-right launcher + a VS-Code-style docked sidebar. */
+.fathom-cc-fab {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 40;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 9999px;
+  border: none;
+  background: var(--fathom-accent, #4f9cff);
+  color: #0b1f33;
+  font-size: 1.25rem;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+.fathom-cc-fab:hover {
+  filter: brightness(1.08);
+}
+.fathom-cc-sidebar {
+  position: fixed;
+  /* Sits below the top bar (≈ its height) so the bell + sign-out stay reachable. */
+  top: 3.5rem;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  width: 23rem;
+  max-width: 100vw;
+  display: flex;
+  flex-direction: column;
+  background: #171a21;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+}
+.fathom-cc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+.fathom-cc-head-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+/* When the sidebar is pinned (docked) the main content is padded so the panel never covers it. */
+.fathom-shell-docked main {
+  padding-right: 23rem;
+}
+.fathom-cc {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.fathom-cc-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 0.75rem;
+  align-content: start;
+  padding: 0.75rem;
+}
+.fathom-cc-input {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+.fathom-cc-input input {
+  flex: 1;
+  min-width: 0;
+  border-radius: 0.375rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #0f1116;
+  padding: 0.5rem 0.75rem;
+  color: #f1f5f9;
+}
+.fathom-cc-input input::placeholder {
+  color: #94a3b8;
+}
+.fathom-cc-thread-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.fathom-cc-msg {
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  max-width: 92%;
+}
+.fathom-cc-msg-user {
+  justify-self: end;
+  background: rgba(79, 156, 255, 0.16);
+  color: #f1f5f9;
+}
+.fathom-cc-msg-bot {
+  justify-self: start;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.fathom-cc-msg-bot .fathom-answer {
+  white-space: pre-wrap;
+}
+.fathom-cc-msg-error {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.08);
+}
+.fathom-cc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+@media (max-width: 640px) {
+  .fathom-cc-sidebar {
+    width: 100vw;
+  }
+  .fathom-shell-docked main {
+    padding-right: 0;
+  }
+}
+
+/* Runtime settings rows (ADR-038/043): human label primary, env key secondary, inactive greyed. */
+.fathom-setting-label {
+  font-weight: 600;
+  color: #f1f5f9;
+}
+.fathom-setting-key {
+  display: block;
+  margin-top: 0.15rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: #8aa0bf;
+}
+.fathom-setting-inactive {
+  opacity: 0.5;
 }

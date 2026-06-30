@@ -3,13 +3,17 @@
 // every authenticated user; the user-management panel is gated on MANAGE_USERS (admin) and
 // hidden otherwise — the server stays authoritative (every grant/revoke is audited there).
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 
 import { ApiError } from "../../api/client";
 import {
   useAdminUsers,
   useCreateAssignment,
+  useCreateUser,
   useDeleteAssignment,
+  useMfaEnroll,
+  useMfaVerify,
   useServerConfig,
   useUserAssignments,
   useVolumes,
@@ -18,6 +22,9 @@ import {
 import { principalHas, type Role } from "../../auth/rbac";
 import type { AdminUserOut, CreateAssignmentRequest } from "../../api/types";
 import { QueryState } from "../common/QueryState";
+import { Tabs, type TabDef } from "../common/Tabs";
+import { RerunSetupControl } from "../onboarding/RerunSetupControl";
+import { RuntimeSettings } from "./RuntimeSettings";
 
 const ROLES: Role[] = ["viewer", "operator", "remediator", "auditor", "admin"];
 const SCOPE_KINDS: CreateAssignmentRequest["scope_kind"][] = ["global", "host", "volume"];
@@ -59,6 +66,153 @@ function MyAccount(): JSX.Element {
           </dl>
         ) : null}
       </QueryState>
+    </section>
+  );
+}
+
+// Per-user TOTP enrolment (any authenticated user). Enrol → scan a QR code (or enter the secret by
+// hand) in an authenticator app → confirm with a 6-digit code. MFA is required to reveal stored
+// secrets and for destructive actions (remediation, agent deploy). The QR is rendered LOCALLY from
+// the otpauth URI (qrcode.react, in-browser) — the secret is never sent to any external QR service,
+// preserving the original no-leak posture while still letting the phone scan it.
+function MfaSetup(): JSX.Element {
+  const me = useWhoAmI();
+  const enroll = useMfaEnroll();
+  const verify = useMfaVerify();
+  const [uri, setUri] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [done, setDone] = useState(false);
+
+  const enrolled = me.data?.mfa_enrolled ?? false;
+  const secret = uri ? new URLSearchParams(uri.split("?")[1] ?? "").get("secret") : null;
+
+  const begin = (): void => {
+    setDone(false);
+    enroll.mutate(undefined, {
+      onSuccess: (d) => {
+        setUri(d.provisioning_uri);
+        setCode("");
+      },
+    });
+  };
+  const confirm = (e: React.FormEvent): void => {
+    e.preventDefault();
+    verify.mutate(code.trim(), {
+      onSuccess: () => {
+        setDone(true);
+        setUri(null);
+        setCode("");
+      },
+    });
+  };
+  const copy = (text: string): void => {
+    void navigator.clipboard?.writeText(text);
+  };
+
+  return (
+    <section aria-label="Multi-factor authentication" className="fathom-card">
+      <h2 className="fathom-card-title">Multi-factor authentication</h2>
+      <p className="fathom-muted">
+        A time-based one-time code (TOTP) from an authenticator app. Required to reveal stored
+        secrets and for destructive actions (remediation, agent deploy).
+      </p>
+      <p>
+        Status:{" "}
+        {enrolled ? (
+          <span className="fathom-badge fathom-badge-success">enabled</span>
+        ) : (
+          <span className="fathom-badge fathom-badge-neutral">not set up</span>
+        )}
+        {done ? (
+          <span role="status" className="fathom-inline-ok">
+            {" "}
+            MFA enabled.
+          </span>
+        ) : null}
+      </p>
+
+      {uri == null ? (
+        <button
+          type="button"
+          className="fathom-btn fathom-btn-primary"
+          disabled={enroll.isPending}
+          onClick={begin}
+        >
+          {enroll.isPending ? "Starting…" : enrolled ? "Re-enrol authenticator" : "Set up MFA"}
+        </button>
+      ) : (
+        <div className="fathom-mfa-setup">
+          <ol className="fathom-steps">
+            <li>
+              Open your authenticator app (Google Authenticator, Authy, 1Password…), add a new
+              account, and scan this QR code:
+              <div className="fathom-qr">
+                <QRCodeSVG value={uri} size={180} marginSize={2} aria-label="MFA enrolment QR code" />
+              </div>
+            </li>
+            <li>
+              <details className="fathom-advanced">
+                <summary>Can&apos;t scan? Enter the secret by hand</summary>
+                <div className="fathom-form-inline">
+                  <code className="fathom-revealed">{secret}</code>
+                  <button type="button" className="fathom-btn" onClick={() => copy(secret ?? "")}>
+                    Copy secret
+                  </button>
+                </div>
+                <div className="fathom-form-inline">
+                  <code className="fathom-path">{uri}</code>
+                  <button type="button" className="fathom-btn" onClick={() => copy(uri)}>
+                    Copy otpauth URI
+                  </button>
+                </div>
+              </details>
+            </li>
+            <li>Enter the 6-digit code it shows to confirm:</li>
+          </ol>
+          <form className="fathom-form-inline" onSubmit={confirm} aria-label="Confirm MFA code">
+            <label className="fathom-inline-field">
+              Code
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                minLength={6}
+                maxLength={8}
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                required
+              />
+            </label>
+            <button
+              type="submit"
+              className="fathom-btn fathom-btn-primary"
+              disabled={verify.isPending || code.trim().length < 6}
+            >
+              {verify.isPending ? "Verifying…" : "Verify & enable"}
+            </button>
+            <button
+              type="button"
+              className="fathom-btn"
+              onClick={() => {
+                setUri(null);
+                setCode("");
+              }}
+            >
+              Cancel
+            </button>
+          </form>
+          {verify.isError ? (
+            <p role="alert" className="fathom-inline-error">
+              Invalid code — check your device clock and enter the current code.
+            </p>
+          ) : null}
+        </div>
+      )}
+      {enroll.isError ? (
+        <p role="alert" className="fathom-inline-error">
+          Could not start enrolment.
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -185,12 +339,77 @@ function AssignmentEditor({ user }: { user: AdminUserOut }): JSX.Element {
 }
 
 function UserManagement(): JSX.Element {
+  const me = useWhoAmI();
+  const canManageUsers = principalHas(me.data, "manage_users");
   const users = useAdminUsers(true);
+  const create = useCreateUser();
   const [openUser, setOpenUser] = useState<number | null>(null);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+
+  const onCreate = (e: React.FormEvent): void => {
+    e.preventDefault();
+    create.mutate(
+      { username: username.trim(), password },
+      {
+        onSuccess: () => {
+          setUsername("");
+          setPassword("");
+        },
+      },
+    );
+  };
 
   return (
     <section aria-label="User management" className="fathom-card">
       <h2 className="fathom-card-title">Users &amp; roles</h2>
+
+      {canManageUsers ? (
+        <form
+          className="fathom-form fathom-form-inline"
+          onSubmit={onCreate}
+          aria-label="Create user"
+        >
+          <label className="fathom-field">
+            Username
+            <input
+              type="text"
+              autoComplete="off"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+            />
+          </label>
+          <label className="fathom-field">
+            Password
+            <input
+              type="password"
+              autoComplete="new-password"
+              minLength={8}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </label>
+          <button
+            type="submit"
+            className="fathom-btn fathom-btn-primary"
+            disabled={create.isPending || username.trim() === "" || password.length < 8}
+          >
+            {create.isPending ? "Creating…" : "Create user"}
+          </button>
+          {create.isError ? (
+            <span role="alert" className="fathom-inline-error">
+              {create.error instanceof ApiError && create.error.status === 409
+                ? "User already exists."
+                : create.error instanceof ApiError
+                  ? (create.error.problem.detail ?? "Could not create user.")
+                  : "Could not create user."}
+            </span>
+          ) : null}
+        </form>
+      ) : null}
+
       <QueryState
         isLoading={users.isLoading}
         isError={users.isError}
@@ -210,8 +429,8 @@ function UserManagement(): JSX.Element {
           </thead>
           <tbody>
             {(users.data ?? []).map((u) => (
-              <>
-                <tr key={u.id}>
+              <Fragment key={u.id}>
+                <tr>
                   <td>{u.display_name ? `${u.display_name} (${u.subject})` : u.subject}</td>
                   <td>{u.source}</td>
                   <td>{u.is_active ? "yes" : "no"}</td>
@@ -227,11 +446,11 @@ function UserManagement(): JSX.Element {
                   </td>
                 </tr>
                 {openUser === u.id ? (
-                  <tr key={`${u.id}-detail`}>
+                  <tr>
                     <AssignmentEditor user={u} />
                   </tr>
                 ) : null}
-              </>
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -269,11 +488,15 @@ function ServerConfig(): JSX.Element {
             <dd>
               <code>{cfg.data.inference_provider}</code>
             </dd>
+            <dt>Inference model</dt>
+            <dd>
+              <code>{cfg.data.inference_model}</code>
+            </dd>
             <dt>Inference URL</dt>
             <dd className="fathom-path">{cfg.data.inference_ollama_url}</dd>
-            <dt>Organize model</dt>
+            <dt>Organize model override</dt>
             <dd>
-              <code>{cfg.data.organize_model}</code>
+              <code>{cfg.data.organize_model ?? "(uses inference model)"}</code>
             </dd>
             <dt>Cloud inference egress</dt>
             <dd>{onOff(cfg.data.inference_allow_egress)}</dd>
@@ -297,20 +520,47 @@ function ServerConfig(): JSX.Element {
 export function Settings(): JSX.Element {
   const me = useWhoAmI();
   const canManageUsers = principalHas(me.data, "manage_users");
+  const canManageSettings = principalHas(me.data, "manage_settings");
+
+  const tabs: TabDef[] = [
+    {
+      id: "account",
+      label: "Account",
+      content: (
+        <>
+          <MyAccount />
+          <MfaSetup />
+        </>
+      ),
+    },
+    {
+      id: "config",
+      label: "Configuration",
+      content: canManageSettings ? (
+        <>
+          <RuntimeSettings />
+          <RerunSetupControl />
+        </>
+      ) : (
+        <ServerConfig />
+      ),
+    },
+  ];
+  if (canManageUsers) {
+    tabs.push({ id: "users", label: "Users & roles", content: <UserManagement /> });
+  }
 
   return (
     <section aria-labelledby="settings-title" className="fathom-page">
       <header className="fathom-page-head">
         <h1 id="settings-title">Settings</h1>
         <p className="fathom-muted">
-          Your account, the server&apos;s feature configuration, and (for admins) user and role
-          management.
+          Your account, the server&apos;s feature configuration, and (for admins) runtime settings,
+          user and role management.
         </p>
       </header>
 
-      <MyAccount />
-      <ServerConfig />
-      {canManageUsers ? <UserManagement /> : null}
+      <Tabs tabs={tabs} ariaLabel="Settings sections" />
     </section>
   );
 }

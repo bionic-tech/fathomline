@@ -169,28 +169,29 @@ class StagingStore:
         run_id: int,
         host_id: str,
         volume_id: str,
-        removals: Sequence[tuple[int, str]],
+        removals: Sequence[tuple[int, int, str]],
     ) -> int:
-        """Stage the (inode, path) pairs the change feed observed removed (incremental subsystem).
+        """Stage the (dev, inode, path) triples the change feed observed removed (incremental).
 
         Idempotent on ``(host_id, volume_id, dev, inode)``: re-staging the same removal re-attaches
         it to this run and re-marks it unpushed (so a resumed cycle re-pushes it harmlessly — the
         server's removal is itself idempotent). Returns the number of removal rows written.
 
-        The incremental change feed reports ``(inode, path)`` only, so removals are staged with
-        ``dev = 0`` (the table default). Threading the real ``st_dev`` through the feed is the
-        remaining cross-dataset work for the deletion path (see module TODO); the *initial* scan
-        upsert — where collisions actually clobbered data — already carries the real ``dev``.
+        The change feed reports the real ``st_dev`` per removal so the staged removal — and the
+        server's ``present=False`` flip — keys on the full catalogue identity ``(dev, inode)``: a
+        cross-dataset inode collision (ZFS child datasets reuse low inode numbers) no longer flips
+        the wrong device's row. ``dev`` defaults to 0 for single-filesystem / remote backends.
         """
         rows = [
             {
                 "host_id": host_id,
                 "volume_id": volume_id,
+                "dev": dev,
                 "inode": inode,
                 "path": path,
                 "scan_run_id": run_id,
             }
-            for inode, path in removals
+            for dev, inode, path in removals
         ]
         if not rows:
             return 0
@@ -198,8 +199,8 @@ class StagingStore:
             before = self._conn.total_changes
             self._conn.executemany(
                 "INSERT INTO staged_removal "
-                "(host_id, volume_id, inode, path, scan_run_id, pushed) "
-                "VALUES (:host_id, :volume_id, :inode, :path, :scan_run_id, 0) "
+                "(host_id, volume_id, dev, inode, path, scan_run_id, pushed) "
+                "VALUES (:host_id, :volume_id, :dev, :inode, :path, :scan_run_id, 0) "
                 "ON CONFLICT(host_id, volume_id, dev, inode) DO UPDATE SET "
                 "path = excluded.path, scan_run_id = excluded.scan_run_id, pushed = 0",
                 rows,
@@ -271,22 +272,27 @@ class StagingStore:
             ).fetchone()
         return row is not None
 
-    def load_baseline(self, *, host_id: str, volume_id: str) -> dict[int, tuple[float, str]]:
-        """Load the prior cycle's ``{inode: (mtime, path)}`` for this ``(host, volume)``.
+    def load_baseline(
+        self, *, host_id: str, volume_id: str
+    ) -> dict[tuple[int, int], tuple[float, str]]:
+        """Load the prior cycle's ``{(dev, inode): (mtime, path)}`` for this ``(host, volume)``.
 
         This is the baseline a :class:`~fathom.agent.reader.feed.RestatFeed` diffs the fresh walk
-        against: a new inode is a CREATE, a changed ``mtime``/``path`` a MODIFY, and a baseline
-        inode absent from the fresh walk a DELETE. The staged rows persist across cycles (the queue
-        marks them ``pushed`` rather than deleting them), so the last walk's state is recoverable
-        here without a separate journal. Keyed on ``inode`` alone (the known single-fs followup —
-        ``dev`` defaults to 0; a cross-dataset baseline would need ``dev`` threaded through here).
+        against: a new ``(dev, inode)`` is a CREATE, a changed ``mtime``/``path`` a MODIFY, and a
+        baseline ``(dev, inode)`` absent from the fresh walk a DELETE. The staged rows persist
+        across cycles (the queue marks them ``pushed`` rather than deleting them), so the last
+        walk's state is recoverable without a separate journal. Keyed on ``(dev, inode)`` — the
+        catalogue identity — so colliding inodes on different ZFS child datasets of a
+        ``cross_mounts`` volume don't collapse into one slot (``dev`` defaults to 0 for a single
+        filesystem, where inode alone is already unique).
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT inode, mtime, path FROM staged_entry WHERE host_id = ? AND volume_id = ?",
+                "SELECT dev, inode, mtime, path FROM staged_entry "
+                "WHERE host_id = ? AND volume_id = ?",
                 (host_id, volume_id),
             ).fetchall()
-        return {row["inode"]: (row["mtime"], row["path"]) for row in rows}
+        return {(row["dev"], row["inode"]): (row["mtime"], row["path"]) for row in rows}
 
     def iter_candidates(
         self, *, host_id: str, volume_id: str, scope_prefix: str

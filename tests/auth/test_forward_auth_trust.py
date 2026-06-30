@@ -9,9 +9,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 
+from fathom.api.auth_deps import require
 from fathom.auth.models import IdentityBinding
-from fathom.auth.principal import Role
+from fathom.auth.principal import Capability, Role
 from fathom.auth.providers.forward_auth import (
     REMOTE_GROUPS_HEADER,
     REMOTE_USER_HEADER,
@@ -73,3 +75,22 @@ async def test_missing_user_header_defers(api_client: object) -> None:
 @pytest.mark.parametrize("ip", ["10.0.0.1", "172.16.5.5"])
 def test_multiple_cidrs(ip: str) -> None:
     assert _is_trusted_source(ip, ("10.0.0.0/8", "172.16.0.0/12")) is True
+
+
+async def test_trusted_source_unmapped_groups_authenticates_with_zero_grants(
+    api_client: object,
+) -> None:
+    """Remote groups that map to no role → authenticated forward principal with grants=[],
+    and every capability denied 403 (deny-by-default; EC-auth-32)."""
+    provider = ForwardAuthProvider(("10.0.0.0/8",))
+    req = _request(ip="10.0.0.7", user="grantless-gary", groups="unmapped-group")
+    async with db.session_scope() as session:
+        principal = await provider.authenticate(req, session)
+    assert principal is not None  # identity established despite no grants
+    assert principal.source == "forward"
+    assert principal.grants == ()
+    # Every capability is denied (insufficient capability) — no grant confers anything.
+    for cap in Capability:
+        with pytest.raises(HTTPException) as exc:
+            await require(cap)(principal)
+        assert exc.value.status_code == 403

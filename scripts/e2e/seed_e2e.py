@@ -51,6 +51,9 @@ SZ = {
 
 _inode = iter(range(100_001, 200_000))
 
+# The seeded in-app notification's title — asserted verbatim by the verifier and the SPA bell story.
+NOTIFICATION_TITLE = "Host nas-1 can run a larger local model"
+
 
 def _e(path: str, size: int, *, is_dir: bool = False, full_hash: str | None = None) -> dict:
     name = path.rstrip("/").rsplit("/", 1)[-1] or path
@@ -218,6 +221,64 @@ async def _seed_audit(rows: int) -> None:
         await engine.dispose()
 
 
+async def _seed_host_facts() -> None:
+    """DEV FIXTURE: stamp ADR-037 hardware facts so the suitability engine returns a CONCRETE
+    assessment. nas-1 gets a capable box (32 GB RAM + a 16 GB GPU → the large-local-model option is
+    GREEN and the recommendation is an 8B local model); tiger-1 is left fact-less on purpose so the
+    'hardware not reported yet' branch is exercised too. No facts ride the synthetic ingest path, so
+    this writes them directly (same approach as the change-log / audit fixtures above)."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from fathom.core.catalogue.models import Host
+    from fathom.core.settings import get_settings
+
+    engine = create_async_engine(get_settings().database_url, connect_args={"timeout": 30})
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as s:
+            nas = (
+                await s.execute(select(Host).where(Host.name == "nas-1"))
+            ).scalar_one_or_none()
+            if nas is not None:
+                nas.facts = {
+                    "cpu_cores": 8,
+                    "cpu_model": "AMD Ryzen 7 5800X",
+                    "ram_bytes": 32 * 1024**3,
+                    "gpu_name": "NVIDIA RTX 4080",
+                    "gpu_vram_bytes": 16 * 1024**3,
+                    "arch": "x86_64",
+                }
+            await s.commit()
+    finally:
+        await engine.dispose()
+
+
+async def _seed_notifications() -> None:
+    """DEV FIXTURE: raise one in-app notification (ADR-031) so the bell read surface has a
+    deterministic, assertable row. Estate-wide (no host scope) so the global admin sees it; unread,
+    so the unread-count badge is non-zero."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from fathom.core import notifications
+    from fathom.core.catalogue.notification_meta import CATEGORY_RECOMMENDATION, SEVERITY_INFO
+    from fathom.core.settings import get_settings
+
+    engine = create_async_engine(get_settings().database_url, connect_args={"timeout": 30})
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as s:
+            await notifications.emit(
+                s,
+                category=CATEGORY_RECOMMENDATION,
+                title=NOTIFICATION_TITLE,
+                body="nas-1 reports 32 GB RAM and a 16 GB GPU — it can run an 8B local model.",
+                source="suitability_watch",
+                severity=SEVERITY_INFO,
+            )
+            await s.commit()
+    finally:
+        await engine.dispose()
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--api", default=os.environ.get("FATHOM_LOCAL_API", "http://127.0.0.1:8099"))
@@ -294,6 +355,8 @@ async def main() -> None:
 
     await _seed_changes_and_history(weeks=8, changes_per_volume=12)
     await _seed_audit(rows=10)
+    await _seed_host_facts()
+    await _seed_notifications()
 
     # ---- expected tallies the verifier asserts against ----
     downloads = [
@@ -343,6 +406,17 @@ async def main() -> None:
             "comparison": "/raid/mirror",
             "identical": 1,
             "missing_on_comparison": 1,
+        },
+        "suitability": {  # ADR-037 traffic-lights; nas-1 has facts (32 GB + 16 GB GPU), tiger-1 not
+            "facts_host": "nas-1",
+            "facts_recommended_provider": "ollama",
+            "facts_recommended_model": "llama3.1:8b",
+            "nofacts_host": "tiger-1",
+            "egress_allowed": False,  # FATHOM_INFERENCE_ALLOW_EGRESS unset -> default False
+        },
+        "notification": {  # ADR-031 bell: the one seeded estate-wide, unread notification
+            "title": NOTIFICATION_TITLE,
+            "category": "recommendation",
         },
     }
     os.makedirs(os.path.dirname(args.out), exist_ok=True)

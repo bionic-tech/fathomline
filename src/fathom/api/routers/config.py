@@ -31,6 +31,7 @@ async def get_server_config(settings: SettingsDep, _scope: ConfigScopeDep) -> Se
     return ServerConfigOut(
         organize_enabled=settings.organize_enabled,
         inference_provider=settings.inference_provider,
+        inference_model=settings.inference_model,
         inference_ollama_url=settings.inference_ollama_url,
         organize_model=settings.organize_model,
         inference_allow_egress=settings.inference_allow_egress,
@@ -39,4 +40,10 @@ async def get_server_config(settings: SettingsDep, _scope: ConfigScopeDep) -> Se
         remediation_blast_cap=settings.remediation_blast_cap,
         preview_enabled=settings.preview_enabled,
         change_log_retention_days=settings.change_log_retention_days,
+        concierge_enabled=settings.concierge_enabled,
+        concierge_model=settings.concierge_model,
+        concierge_embeddings_enabled=settings.concierge_embeddings_enabled,
+        scan_coordinator_enabled=settings.scan_coordinator_enabled,
+        notifications_enabled=settings.notifications_enabled,
+        onboarding_completed=settings.onboarding_completed,
     )

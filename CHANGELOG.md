@@ -8,6 +8,40 @@ tagged release the public API and configuration may still change.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-30
+
+### Added
+
+- **Scan Now** — on-demand metadata or full-content scans of a host's volumes, dispatched to the
+  owning agent over the signed-job channel (single-use, time-boxed, signature + nonce verified),
+  capability-gated and non-destructive; plus a read-only "scan-only" listener mode so a host can
+  serve Scan Now without arming the write path.
+- **Scan coordinator** — an opt-in core-side lease that serialises heavy scans so concurrent
+  nightly runs can't saturate the database.
+- **Notification Center** — an in-app bell plus pluggable outbound channels, fed by a proactive
+  watch worker: volume-capacity and days-to-full forecasts, and a stale-scan alert that flags a
+  host whose scheduled scan has silently stopped completing.
+- **AI concierge** — natural-language questions over the catalogue (classify → query → narrate via
+  a pluggable local or remote model) and optional semantic path search (pgvector embeddings).
+- **Distributed sandboxed previews** — file previews rendered in a gVisor-isolated worker, so the
+  core never opens untrusted bytes.
+- **Suitability assessment + first-run onboarding** wizard.
+- **Native Windows agent — full-content hashing (phase W2)**: reads local files but never hydrates
+  cloud placeholders (no OneDrive/recall hangs), and **drive-type tags** in the UI (network / USB /
+  NVMe / SATA / cloud) so a mount's connection and medium are visible when choosing scan scope.
+- **Provider-aware inference settings** with a cohesive, cross-feature model selection.
+
+### Changed
+
+- Agents screen redesigned around per-host cards; the Deploy wizard derives the in-container agent
+  path from the picked host path; volumes carry their connection/medium as a visible tag.
+
+### Security
+
+- MFA TOTP secrets are now encrypted at rest via the runtime settings store (backward-compatible).
+
+## [0.1.0] - 2026-06-18
+
 The initial public release: a multi-host, multi-filesystem disk-estate analyzer. Lightweight
 read-only agents scan each host and push file metadata over mutually-authenticated TLS into a
 central catalogue; a React UI gives treemaps, estate-wide search, growth trends, duplicate
@@ -56,4 +90,6 @@ detection, and a strictly opt-in, audited cleanup path.
 - Full-content hashing is refused over remote transports (SMB/SFTP/rclone); content is only
   ever hashed on the host where the data physically lives.
 
-[Unreleased]: https://github.com/bionic-technologies/fathomline/commits/main
+[Unreleased]: https://github.com/bionic-tech/fathomline/compare/v0.2.0...main
+[0.2.0]: https://github.com/bionic-tech/fathomline/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/bionic-tech/fathomline/releases/tag/v0.1.0

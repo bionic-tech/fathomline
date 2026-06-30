@@ -147,7 +147,9 @@ async def test_deploy_batch_runs_to_success(deploy_client: httpx.AsyncClient) ->
     run_id = resp.json()["run_id"]
 
     # The deploy runs as a background task; poll the status until terminal (fake SSH is instant).
-    for _ in range(50):
+    # Budget generously (~5s): under full-suite load the event loop is contended, so a 1s budget
+    # flaked even though the deploy completes within a second in isolation.
+    for _ in range(250):
         status = await deploy_client.get(f"/api/v1/deployment/runs/{run_id}", headers=headers)
         assert status.status_code == 200
         body = status.json()
@@ -197,6 +199,40 @@ async def test_enroll_then_redeem_bundle_single_use(deploy_client: httpx.AsyncCl
     audit = await deploy_client.get("/api/v1/audit?limit=50", headers=headers)
     actions = [r["action"] for r in audit.json()["items"]]
     assert "deployment.enroll.redeemed" in actions
+
+
+async def test_redeemed_bundle_cert_is_minted_off_the_provisioned_ca(
+    deploy_client: httpx.AsyncClient,
+) -> None:
+    # PULL path, end to end without SSH: the bundle the target redeems carries a *real* agent
+    # identity — its client cert was minted off the provisioned (test) CA. Prove it chains to the
+    # bundled CA cert and carries the CN=<host>-agent + clientAuth EKU the mTLS proxy keys on. The
+    # existing single-use test only checks file *names*; this proves the cert mint actually ran.
+    from cryptography import x509
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    headers = await seed_principal(role=Role.ADMIN, mfa_fresh=True)
+    issued = await deploy_client.post(
+        "/api/v1/deployment/enroll", json={"host_id": "node-2"}, headers=headers
+    )
+    assert issued.status_code == 201
+    token = issued.json()["token"]
+
+    bundle = await deploy_client.get(
+        "/api/v1/deployment/enroll/bundle", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert bundle.status_code == 200
+    with tarfile.open(fileobj=io.BytesIO(bundle.content), mode="r:gz") as tar:
+        client_crt = tar.extractfile("certs/client.crt").read()  # type: ignore[union-attr]
+        ca_crt = tar.extractfile("certs/fathom-ca.crt").read()  # type: ignore[union-attr]
+
+    leaf = x509.load_pem_x509_certificate(client_crt)
+    ca = x509.load_pem_x509_certificate(ca_crt)
+    leaf.verify_directly_issued_by(ca)  # raises unless the CA actually signed the leaf
+    assert leaf.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == "node-2-agent"
+    eku = leaf.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+    assert ExtendedKeyUsageOID.CLIENT_AUTH in eku
+    assert leaf.extensions.get_extension_for_class(x509.BasicConstraints).value.ca is False
 
 
 async def test_windows_enroll_redeems_zip_bundle(deploy_client: httpx.AsyncClient) -> None:
@@ -253,6 +289,50 @@ async def test_windows_enroll_rejects_unsafe_scan_path(deploy_client: httpx.Asyn
             "host_id": "win-1",
             "platform": "windows",
             "windows_scan_paths": ["C:\\report.txt:ads"],  # alternate data stream
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
+async def test_windows_enroll_emits_fullbit_scope_for_flagged_paths(
+    deploy_client: httpx.AsyncClient,
+) -> None:
+    # ADR-027 W2: a path listed in windows_fullbit_paths lands in the bundle's fullbit_scope
+    # (content hashing); an unflagged one stays metadata-only.
+    import zipfile
+
+    headers = await seed_principal(role=Role.ADMIN, mfa_fresh=True)
+    issued = await deploy_client.post(
+        "/api/v1/deployment/enroll",
+        json={
+            "host_id": "win-1",
+            "platform": "windows",
+            "windows_scan_paths": ["C:\\Data", "D:\\Media"],
+            "windows_fullbit_paths": ["D:\\Media"],
+        },
+        headers=headers,
+    )
+    assert issued.status_code == 201
+    hdr = {"Authorization": f"Bearer {issued.json()['token']}"}
+    bundle = await deploy_client.get("/api/v1/deployment/enroll/bundle", headers=hdr)
+    with zipfile.ZipFile(io.BytesIO(bundle.content), "r") as zf:
+        config = zf.read("agent.config.yaml").decode()
+    assert "fullbit_scope:\n  - 'D:\\Media'" in config
+    assert "fullbit_scope: []" not in config
+
+
+async def test_windows_enroll_rejects_fullbit_outside_scan_scope(
+    deploy_client: httpx.AsyncClient,
+) -> None:
+    headers = await seed_principal(role=Role.ADMIN, mfa_fresh=True)
+    resp = await deploy_client.post(
+        "/api/v1/deployment/enroll",
+        json={
+            "host_id": "win-1",
+            "platform": "windows",
+            "windows_scan_paths": ["C:\\Data"],
+            "windows_fullbit_paths": ["E:\\Other"],  # not in scan_scope
         },
         headers=headers,
     )
@@ -360,6 +440,51 @@ async def test_enroll_bundle_requires_bearer_token(deploy_client: httpx.AsyncCli
     # No token at all → 403 (the deploy surface never advertises an auth challenge).
     resp = await deploy_client.get("/api/v1/deployment/enroll/bundle")
     assert resp.status_code == 403
+
+
+async def test_enroll_bundle_rejects_non_bearer_and_empty_token(
+    deploy_client: httpx.AsyncClient,
+) -> None:
+    # The token gate accepts ONLY a non-empty `Bearer` scheme (EC-enroll-3). A wrong scheme, an
+    # empty/whitespace token, or a bare scheme word are all 403 — never a different status that
+    # would leak which part was wrong, and never an auth challenge to an anonymous caller.
+    for header in (
+        {"Authorization": "Basic dXNlcjpwdw=="},  # wrong scheme
+        {"Authorization": "Bearer "},  # empty token
+        {"Authorization": "Bearer    "},  # whitespace-only token
+        {"Authorization": "Bearer"},  # scheme word only, no token
+        {"Authorization": "token-without-scheme"},  # no scheme at all
+    ):
+        resp = await deploy_client.get("/api/v1/deployment/enroll/bundle", headers=header)
+        assert resp.status_code == 403, f"{header} -> {resp.status_code}"
+    # The same gate fronts the image route.
+    img = await deploy_client.get(
+        "/api/v1/deployment/enroll/image", headers={"Authorization": "Basic x"}
+    )
+    assert img.status_code == 403
+
+
+async def test_deploy_empty_batch_is_422(deploy_client: httpx.AsyncClient) -> None:
+    # An empty hosts list is a malformed request (min_length=1), refused at the wire model before
+    # any deploy work — 422, not a 200 no-op run (EC-deploy-1).
+    headers = await seed_principal(role=Role.ADMIN, mfa_fresh=True)
+    resp = await deploy_client.post(
+        "/api/v1/deployment/deploy", json={"hosts": []}, headers=headers
+    )
+    assert resp.status_code == 422
+
+
+async def test_deploy_over_64_hosts_is_422(deploy_client: httpx.AsyncClient) -> None:
+    # The batch is capped at 64 hosts (max_length); 65 is refused at the wire model (EC-deploy-2):
+    # an operator cannot fan out an unbounded SSH storm in one call.
+    headers = await seed_principal(role=Role.ADMIN, mfa_fresh=True)
+    hosts = [
+        {"target": f"10.0.0.{i}", "host_id": f"h{i}", "credential": _cred()} for i in range(65)
+    ]
+    resp = await deploy_client.post(
+        "/api/v1/deployment/deploy", json={"hosts": hosts}, headers=headers
+    )
+    assert resp.status_code == 422
 
 
 async def test_image_endpoint_serves_archive_without_consuming_token(

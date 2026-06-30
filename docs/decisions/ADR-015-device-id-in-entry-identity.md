@@ -86,7 +86,7 @@ Make the device id part of the entry identity. The catalogue uniqueness becomes
   explicit module TODOs: `stage_removals` (the change feed reports `(inode, path)` only),
   `stage_hash` (the full-bit funnel), and `load_baseline` (keyed on inode). A cross-dataset
   removal, full-bit, or baseline therefore remains a follow-up (`store.py:181-183`, `:246-247`,
-  `:282`).
+  `:282`). *(Removal + baseline closed 2026-06-28 — see Addendum; `stage_hash` remains.)*
 
 ### Risks
 - **PostgreSQL partitioned-table DDL.** The unique swap is raw `ALTER` DDL on the partitioned
@@ -104,3 +104,46 @@ Make the device id part of the entry identity. The catalogue uniqueness becomes
 - The migration's `down_revision` chains linearly off the then-sole head `e5b3c7f2a9d1`
   (`uv run alembic heads` reported one head before this revision); confirm no branch was
   introduced when later revisions land.
+- The cross-dataset removal + baseline staging paths are now `(dev, inode)`-keyed (Addendum,
+  2026-06-28); the full-bit (`stage_hash`) path is the one remaining inode-only staging path.
+
+## Addendum (2026-06-28): cross-dataset removal + baseline follow-ups closed
+
+**Status:** Accepted **Deciders:** project owner
+
+Two of the three deferred staging paths in *Consequences → Negative* — `stage_removals` and
+`load_baseline` — now thread `(dev, inode)` end-to-end, so the incremental **DELETE** path honours
+the same identity the upsert path established here. This closes the cross-dataset false-removal it
+left open: on a `cross_mounts` volume where two ZFS child datasets reuse a low inode, a removal for
+one device previously flipped the *other* device's still-present row to `present=False` and emitted
+a spurious DELETE into the churn feed — dropping a surviving file out of inventory / search / dedup
+(and the concierge "what changed" feed) until the next full re-scan re-reported it. The
+inode-keyed agent baseline meant a quiescent survivor was not re-reported on an incremental tick, so
+recovery waited on a full scan.
+
+The change is additive and needs **no new migration** (`FsEntryRow.dev` already exists from this
+decision):
+
+- **Agent feed** (`reader/feed.py`): `ChangeEvent` carries `dev`; the `RestatFeed` baseline and
+  `collect_delta` key on `(dev, inode)` so colliding inodes no longer collapse into one slot;
+  `ChangeDelta.removals` carries `(dev, inode, path)`.
+- **Agent staging** (`staging/store.py`): `stage_removals` takes `(dev, inode, path)` triples and
+  persists the real `st_dev`; `load_baseline` returns `{(dev, inode): (mtime, path)}`.
+- **Wire** (`api/schemas.py`): a new `IngestBatch.removed: list[RemovedEntryIn{dev, inode}]`. The
+  legacy `removed_inodes: list[int]` is retained as a **deprecated inode-only fallback** so a
+  pre-`(dev,inode)` agent still applies removals (mapped to `(None, inode)` — the old, lossy
+  behaviour, accepted only for back-compat during a mixed-version rollout); `removed` wins when
+  both are present.
+- **Server reconciler** (`core/incremental.py`): `_removal_filter` OR-combines precise
+  `tuple_(FsEntryRow.dev, FsEntryRow.inode).in_(...)` with the legacy `inode.in_(...)`; the
+  `_mark_removed` KNOWN-LIMITATION note is removed.
+
+### Still open
+- **`stage_hash` (full-bit funnel)** still defaults `dev = 0` (`store.py` module TODO) — the one
+  un-threaded staging path. Lower impact than removal: full-bit keys a *content* hash onto an
+  already-staged metadata row, so a cross-dataset inode collision would at worst mis-target an
+  in-place hash update, not clobber identity or remove a live file.
+- **`ZfsDiffFeed`** removal/rename-out events still resolve `dev = 0` (its `baseline_paths` map is
+  `path → inode` only). It has no production caller today (`runner._default_feed_for` returns
+  `None` for ZFS, so the `RestatFeed` fallback is the live path); thread `dev` through it if/when
+  the ZFS diff feed is wired in.

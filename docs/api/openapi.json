@@ -33,6 +33,12 @@
             "title": "Keeper Path",
             "type": "string"
           },
+          "kind": {
+            "const": "remediation",
+            "default": "remediation",
+            "title": "Kind",
+            "type": "string"
+          },
           "mode": {
             "enum": [
               "dry_run",
@@ -869,6 +875,230 @@
         "title": "ClaimedJob",
         "type": "object"
       },
+      "ConciergeActionOut": {
+        "description": "A suggested next step the UI renders as a button — navigation to a (separately gated) page.\nThe concierge never executes mutations; this only routes the user to the relevant tool.",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "route": {
+            "title": "Route",
+            "type": "string"
+          },
+          "volume_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume Id"
+          }
+        },
+        "required": [
+          "label",
+          "route"
+        ],
+        "title": "ConciergeActionOut",
+        "type": "object"
+      },
+      "ConciergeAnswerOut": {
+        "description": "A concierge answer: the prose, the tool the model chose, grounded citations + next steps.",
+        "properties": {
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/ConciergeActionOut"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/ConciergeCitationOut"
+            },
+            "title": "Citations",
+            "type": "array"
+          },
+          "considered": {
+            "title": "Considered",
+            "type": "integer"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "answer",
+          "tool",
+          "considered",
+          "citations"
+        ],
+        "title": "ConciergeAnswerOut",
+        "type": "object"
+      },
+      "ConciergeAskRequest": {
+        "description": "A natural-language question for the concierge, with optional host/volume + page hints.",
+        "properties": {
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/ConciergeTurn"
+            },
+            "maxItems": 20,
+            "title": "History",
+            "type": "array"
+          },
+          "host_id": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Id"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "question": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          },
+          "tool": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool"
+          },
+          "volume_id": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume Id"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "title": "ConciergeAskRequest",
+        "type": "object"
+      },
+      "ConciergeCitationOut": {
+        "description": "A server-built reference to a real result row the answer is grounded in (never the LLM's).",
+        "properties": {
+          "entry_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Id"
+          },
+          "host_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Id"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "volume_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume Id"
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "title": "ConciergeCitationOut",
+        "type": "object"
+      },
+      "ConciergeTurn": {
+        "description": "One prior turn of the conversation, supplied so follow-ups resolve (memory; ADR-035).",
+        "properties": {
+          "content": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ],
+        "title": "ConciergeTurn",
+        "type": "object"
+      },
       "CreateAssignmentRequest": {
         "description": "Grant a ``(role, scope)`` assignment to a user (ADD 13 §§2-3).",
         "properties": {
@@ -1461,6 +1691,13 @@
             "title": "Remote Targets",
             "type": "array"
           },
+          "windows_fullbit_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Windows Fullbit Paths",
+            "type": "array"
+          },
           "windows_scan_paths": {
             "items": {
               "type": "string"
@@ -1958,6 +2195,159 @@
         "title": "HistoryPointOut",
         "type": "object"
       },
+      "HostFactsFrame": {
+        "description": "Hardware facts an agent probes (ADR-037) — all optional, best-effort, never sensitive.\n\nUsed by the suitability engine to rate AI options per host. Bounded so a malformed/oversized\nagent report can never bloat the catalogue.",
+        "properties": {
+          "arch": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arch"
+          },
+          "cpu_cores": {
+            "anyOf": [
+              {
+                "maximum": 4096.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Cores"
+          },
+          "cpu_model": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Model"
+          },
+          "gpu_name": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu Name"
+          },
+          "gpu_vram_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu Vram Bytes"
+          },
+          "ram_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ram Bytes"
+          }
+        },
+        "title": "HostFactsFrame",
+        "type": "object"
+      },
+      "HostFactsOut": {
+        "description": "A host's reported hardware facts (ADR-037; any field may be null).",
+        "properties": {
+          "arch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arch"
+          },
+          "cpu_cores": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Cores"
+          },
+          "cpu_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cpu Model"
+          },
+          "gpu_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu Name"
+          },
+          "gpu_vram_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gpu Vram Bytes"
+          },
+          "ram_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ram Bytes"
+          }
+        },
+        "title": "HostFactsOut",
+        "type": "object"
+      },
       "HostFrame": {
         "description": "Agent self-description; the authoritative identity is the mTLS fingerprint.",
         "properties": {
@@ -1972,6 +2362,16 @@
               }
             ],
             "title": "Agent Version"
+          },
+          "facts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostFactsFrame"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "name": {
             "maxLength": 255,
@@ -2180,8 +2580,89 @@
         "title": "HostStatusOut",
         "type": "object"
       },
+      "HostSuitabilityOut": {
+        "description": "A host's full suitability assessment + the recommended concrete AI settings.",
+        "properties": {
+          "facts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HostFactsOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "facts_known": {
+            "title": "Facts Known",
+            "type": "boolean"
+          },
+          "host_id": {
+            "title": "Host Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/OptionAssessmentOut"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "recommendation": {
+            "title": "Recommendation",
+            "type": "string"
+          },
+          "recommended_chat_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Chat Model"
+          },
+          "recommended_chat_provider": {
+            "title": "Recommended Chat Provider",
+            "type": "string"
+          },
+          "recommended_embedder": {
+            "title": "Recommended Embedder",
+            "type": "string"
+          },
+          "recommended_embedding_dim": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Embedding Dim"
+          }
+        },
+        "required": [
+          "host_id",
+          "name",
+          "facts_known",
+          "options",
+          "recommendation",
+          "recommended_chat_provider",
+          "recommended_chat_model",
+          "recommended_embedder",
+          "recommended_embedding_dim"
+        ],
+        "title": "HostSuitabilityOut",
+        "type": "object"
+      },
       "IngestBatch": {
-        "description": "A single resumable, idempotent push from an agent (ADD 02 §7.2).\n\n``removed_inodes`` carries the **explicit** deletions the incremental change feed detected\n(incremental owner ruling: an explicit present/removed_at marker, NOT snapshot-staleness\ninference). The server marks those ``(host_id, volume_id, inode)`` rows ``present=False`` and\nemits a ``DELETE`` change_log row — it never deletes the catalogue row. Re-appearing inodes\nresurrect on the next upsert. A metadata batch may carry removals; a fullbit batch never does\n(full-bit re-hashes existing files, it does not detect deletions). The list is bounded by the\nsame per-batch limit as ``entries`` so a malformed batch cannot blow up the reconcile step.",
+        "description": "A single resumable, idempotent push from an agent (ADD 02 §7.2).\n\n``removed`` carries the **explicit** deletions the incremental change feed detected, each keyed\non ``(dev, inode)`` (incremental owner ruling: an explicit present/removed_at marker, NOT\nsnapshot-staleness inference). The server marks those ``(host_id, volume_id, dev, inode)`` rows\n``present=False`` and emits a ``DELETE`` change_log row — it never deletes the catalogue row.\nRe-appearing inodes resurrect on the next upsert. A metadata batch may carry removals; a fullbit\nbatch never does (full-bit re-hashes existing files, it does not detect deletions).\n\n``removed_inodes`` is the **DEPRECATED** legacy fallback an old (pre-(dev,inode)) agent sends:\ninode-only removals. It is consulted ONLY when ``removed`` is empty/absent, and an inode-only\nkey can collide across ZFS child datasets on a ``cross_mounts`` volume (the very bug ``removed``\nfixes) — so new agents send ``removed`` instead. Both lists are bounded by the same per-batch\nlimit as ``entries`` so a malformed batch cannot blow up the reconcile step.",
         "properties": {
           "entries": {
             "items": {
@@ -2197,6 +2678,13 @@
             "pattern": "^(metadata|fullbit)$",
             "title": "Mode",
             "type": "string"
+          },
+          "removed": {
+            "items": {
+              "$ref": "#/components/schemas/RemovedEntryIn"
+            },
+            "title": "Removed",
+            "type": "array"
           },
           "removed_inodes": {
             "items": {
@@ -2328,6 +2816,7 @@
         "title": "JobResultPayload",
         "type": "object"
       },
+      "JsonValue": {},
       "LoginRequest": {
         "description": "Local username/password login (ADD 13 §1).",
         "properties": {
@@ -2349,6 +2838,35 @@
           "password"
         ],
         "title": "LoginRequest",
+        "type": "object"
+      },
+      "MarkReadRequest": {
+        "description": "Mark specific notifications read (empty list is a no-op; use mark-all-read for all).",
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 1000,
+            "title": "Ids",
+            "type": "array"
+          }
+        },
+        "title": "MarkReadRequest",
+        "type": "object"
+      },
+      "MarkReadResult": {
+        "description": "How many notifications were newly marked read.",
+        "properties": {
+          "marked": {
+            "title": "Marked",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "marked"
+        ],
+        "title": "MarkReadResult",
         "type": "object"
       },
       "MeResponse": {
@@ -2379,6 +2897,11 @@
             },
             "title": "Groups",
             "type": "array"
+          },
+          "mfa_enrolled": {
+            "default": false,
+            "title": "Mfa Enrolled",
+            "type": "boolean"
           },
           "mfa_fresh": {
             "title": "Mfa Fresh",
@@ -2418,6 +2941,170 @@
           "code"
         ],
         "title": "MfaVerifyRequest",
+        "type": "object"
+      },
+      "NotificationListOut": {
+        "description": "A page of notifications plus the current unread count (for the bell badge).",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/NotificationOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "unread_count": {
+            "title": "Unread Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "unread_count"
+        ],
+        "title": "NotificationListOut",
+        "type": "object"
+      },
+      "NotificationOut": {
+        "description": "One in-app notification for the bell panel.",
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "host_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "read": {
+            "title": "Read",
+            "type": "boolean"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "volume_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume Id"
+          }
+        },
+        "required": [
+          "id",
+          "category",
+          "severity",
+          "title",
+          "body",
+          "source",
+          "created_at",
+          "read"
+        ],
+        "title": "NotificationOut",
+        "type": "object"
+      },
+      "NotifyChannelResult": {
+        "description": "The outcome of one outbound channel send (the test endpoint).",
+        "properties": {
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "channel",
+          "ok"
+        ],
+        "title": "NotifyChannelResult",
+        "type": "object"
+      },
+      "NotifyTestResult": {
+        "description": "Per-channel results of a notification channel connectivity test.",
+        "properties": {
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/NotifyChannelResult"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "title": "NotifyTestResult",
+        "type": "object"
+      },
+      "OptionAssessmentOut": {
+        "description": "One AI option's traffic-light rating for a host.",
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "rating": {
+            "title": "Rating",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "rating",
+          "reason"
+        ],
+        "title": "OptionAssessmentOut",
         "type": "object"
       },
       "OrganizeActivityOut": {
@@ -3389,6 +4076,25 @@
         "title": "RemoteTargetIn",
         "type": "object"
       },
+      "RemovedEntryIn": {
+        "description": "One explicit deletion the incremental change feed observed, keyed on ``(dev, inode)``.\n\nThe removal key matches the catalogue identity ``(host, volume, dev, inode)`` so a removal on a\n``cross_mounts`` volume — where ZFS child datasets reuse low inode numbers — flips ONLY the\nright device's row, never a colliding inode on another dataset. ``dev`` (st_dev) defaults to 0\nfor single-filesystem / remote backends, where inode alone is already unique.",
+        "properties": {
+          "dev": {
+            "default": 0,
+            "title": "Dev",
+            "type": "integer"
+          },
+          "inode": {
+            "title": "Inode",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inode"
+        ],
+        "title": "RemovedEntryIn",
+        "type": "object"
+      },
       "RenderRequest": {
         "additionalProperties": false,
         "description": "One render job sent core→worker: the (already-fetched) raw bytes + the detected type + caps.\n\nThe bytes are base64'd; ``type`` is the magic-byte detection the core already did, but the\nsandbox **re-detects** inside the container and never trusts this hint (defence in depth).",
@@ -3478,6 +4184,88 @@
         "title": "ResourceCaps",
         "type": "object"
       },
+      "RevealSecretOut": {
+        "description": "The decrypted secret value (admin-only, step-up-MFA-gated reveal).",
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "RevealSecretOut",
+        "type": "object"
+      },
+      "ScanAdvisoryOut": {
+        "description": "One coordinator event for the operator read surface (why a scan deferred / lease state).",
+        "properties": {
+          "blocking_host": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocking Host"
+          },
+          "granted_at": {
+            "format": "date-time",
+            "title": "Granted At",
+            "type": "string"
+          },
+          "host_name": {
+            "title": "Host Name",
+            "type": "string"
+          },
+          "is_heavy": {
+            "title": "Is Heavy",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "retry_after_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After Seconds"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host_name",
+          "status",
+          "is_heavy",
+          "granted_at"
+        ],
+        "title": "ScanAdvisoryOut",
+        "type": "object"
+      },
       "ScanCreatedOut": {
         "description": "Acknowledgement that a full-bit scan request was recorded (no write performed).",
         "properties": {
@@ -3500,6 +4288,167 @@
           "mode"
         ],
         "title": "ScanCreatedOut",
+        "type": "object"
+      },
+      "ScanDispatchedOut": {
+        "description": "Acknowledgement that a Scan Now job was signed + enqueued (the agent runs it async).",
+        "properties": {
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "root": {
+            "title": "Root",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "host",
+          "root",
+          "mode"
+        ],
+        "title": "ScanDispatchedOut",
+        "type": "object"
+      },
+      "ScanJob": {
+        "additionalProperties": false,
+        "description": "A scoped, time-boxed, single-use command to scan one root NOW (ADR-025 + Scan Now).\n\nUnlike :class:`ActionJob` this touches no plan and moves nothing — it asks the agent to run a\nmetadata or full-bit scan of one of its configured scan roots immediately. It rides the same\nsigned-job channel (single-use ``nonce`` + ``issued_at``/``expires_at`` window + ``host_id``\nscope), so the actor trusts it exactly as it trusts a remediation job: verify signature + nonce\n+ expiry + scope before doing anything. ``kind`` is the wire discriminator and IS part of the\nsigned bytes, so a scan job's signature can never be replayed as a remediation job (its\ncanonical bytes are structurally distinct AND explicitly typed).",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "host_id": {
+            "minLength": 1,
+            "title": "Host Id",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "kind": {
+            "const": "scan_now",
+            "default": "scan_now",
+            "title": "Kind",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "metadata",
+              "fullbit"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "nonce": {
+            "minLength": 16,
+            "title": "Nonce",
+            "type": "string"
+          },
+          "root": {
+            "minLength": 1,
+            "title": "Root",
+            "type": "string"
+          }
+        },
+        "required": [
+          "nonce",
+          "issued_at",
+          "expires_at",
+          "host_id",
+          "root",
+          "mode"
+        ],
+        "title": "ScanJob",
+        "type": "object"
+      },
+      "ScanLeaseOut": {
+        "description": "The coordinator's verdict for an agent's pre-scan lease request.\n\n``granted`` True ⇒ run now. False ⇒ defer: ``reason`` explains why, ``blocking_host`` names the\nhost whose heavy scan is in progress, ``retry_after_seconds`` advises when to retry.",
+        "properties": {
+          "blocking_host": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocking Host"
+          },
+          "granted": {
+            "title": "Granted",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "retry_after_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry After Seconds"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "granted",
+          "status"
+        ],
+        "title": "ScanLeaseOut",
+        "type": "object"
+      },
+      "ScanNowRequest": {
+        "description": "Operator request to run a scan NOW on one host's agent (Scan Now, P3).\n\nNon-destructive: it asks the agent to immediately scan one of its configured scan roots. The\n``root`` is re-validated server-side against the host's catalogued volumes (a client-named path\nthat is not a registered scan root is refused), and the request is dispatched over the existing\nsigned-job channel — the agent verifies signature + nonce + expiry + scope before scanning.",
+        "properties": {
+          "mode": {
+            "enum": [
+              "metadata",
+              "fullbit"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "root": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Root",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root",
+          "mode"
+        ],
+        "title": "ScanNowRequest",
         "type": "object"
       },
       "ScopeMountIn": {
@@ -3620,9 +4569,32 @@
             "title": "Change Log Retention Days",
             "type": "integer"
           },
+          "concierge_embeddings_enabled": {
+            "title": "Concierge Embeddings Enabled",
+            "type": "boolean"
+          },
+          "concierge_enabled": {
+            "title": "Concierge Enabled",
+            "type": "boolean"
+          },
+          "concierge_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Concierge Model"
+          },
           "inference_allow_egress": {
             "title": "Inference Allow Egress",
             "type": "boolean"
+          },
+          "inference_model": {
+            "title": "Inference Model",
+            "type": "string"
           },
           "inference_ollama_url": {
             "title": "Inference Ollama Url",
@@ -3636,13 +4608,28 @@
             "title": "Inference Timeout Seconds",
             "type": "number"
           },
+          "notifications_enabled": {
+            "title": "Notifications Enabled",
+            "type": "boolean"
+          },
+          "onboarding_completed": {
+            "title": "Onboarding Completed",
+            "type": "boolean"
+          },
           "organize_enabled": {
             "title": "Organize Enabled",
             "type": "boolean"
           },
           "organize_model": {
-            "title": "Organize Model",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organize Model"
           },
           "preview_enabled": {
             "title": "Preview Enabled",
@@ -3655,11 +4642,16 @@
           "remediation_enabled": {
             "title": "Remediation Enabled",
             "type": "boolean"
+          },
+          "scan_coordinator_enabled": {
+            "title": "Scan Coordinator Enabled",
+            "type": "boolean"
           }
         },
         "required": [
           "organize_enabled",
           "inference_provider",
+          "inference_model",
           "inference_ollama_url",
           "organize_model",
           "inference_allow_egress",
@@ -3667,9 +4659,221 @@
           "remediation_enabled",
           "remediation_blast_cap",
           "preview_enabled",
-          "change_log_retention_days"
+          "change_log_retention_days",
+          "concierge_enabled",
+          "concierge_model",
+          "concierge_embeddings_enabled",
+          "scan_coordinator_enabled",
+          "notifications_enabled",
+          "onboarding_completed"
         ],
         "title": "ServerConfigOut",
+        "type": "object"
+      },
+      "SetSecretRequest": {
+        "description": "Store a free-form named secret (a secret-backend reference value), encrypted at rest.",
+        "properties": {
+          "ref": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Ref",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 8192,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "value"
+        ],
+        "title": "SetSecretRequest",
+        "type": "object"
+      },
+      "SetSettingRequest": {
+        "description": "Set or update one setting's in-app override (in-app value wins over the env default).",
+        "properties": {
+          "value": {
+            "$ref": "#/components/schemas/JsonValue"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "SetSettingRequest",
+        "type": "object"
+      },
+      "SettingMutationResult": {
+        "description": "Acknowledgement of a settings mutation + whether a restart is needed for full effect.",
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "overridden": {
+            "title": "Overridden",
+            "type": "boolean"
+          },
+          "restart_required": {
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "overridden",
+          "restart_required",
+          "version"
+        ],
+        "title": "SettingMutationResult",
+        "type": "object"
+      },
+      "SettingOut": {
+        "description": "One in-app-manageable setting: its policy + the effective value (secrets masked).",
+        "properties": {
+          "advanced": {
+            "default": false,
+            "title": "Advanced",
+            "type": "boolean"
+          },
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "editable": {
+            "title": "Editable",
+            "type": "boolean"
+          },
+          "help": {
+            "title": "Help",
+            "type": "string"
+          },
+          "is_secret": {
+            "title": "Is Secret",
+            "type": "boolean"
+          },
+          "is_set": {
+            "title": "Is Set",
+            "type": "boolean"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Options"
+          },
+          "overridden": {
+            "title": "Overridden",
+            "type": "boolean"
+          },
+          "relevant": {
+            "default": true,
+            "title": "Relevant",
+            "type": "boolean"
+          },
+          "relevant_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relevant Hint"
+          },
+          "restart_required": {
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "suggestions": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggestions"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/JsonValue"
+          }
+        },
+        "required": [
+          "key",
+          "category",
+          "type",
+          "editable",
+          "is_secret",
+          "restart_required",
+          "help",
+          "overridden",
+          "is_set",
+          "label"
+        ],
+        "title": "SettingOut",
+        "type": "object"
+      },
+      "SettingsListOut": {
+        "description": "The full settings read surface for the admin Settings page.",
+        "properties": {
+          "named_secrets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Named Secrets",
+            "type": "array"
+          },
+          "settings": {
+            "items": {
+              "$ref": "#/components/schemas/SettingOut"
+            },
+            "title": "Settings",
+            "type": "array"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "settings",
+          "named_secrets",
+          "version"
+        ],
+        "title": "SettingsListOut",
         "type": "object"
       },
       "SignedBrowseRequest": {
@@ -3747,7 +4951,22 @@
             "type": "string"
           },
           "job": {
-            "$ref": "#/components/schemas/ActionJob"
+            "discriminator": {
+              "mapping": {
+                "remediation": "#/components/schemas/ActionJob",
+                "scan_now": "#/components/schemas/ScanJob"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ActionJob"
+              },
+              {
+                "$ref": "#/components/schemas/ScanJob"
+              }
+            ],
+            "title": "Job"
           },
           "key_id": {
             "minLength": 1,
@@ -3929,6 +5148,28 @@
           "username"
         ],
         "title": "SshCredentialIn",
+        "type": "object"
+      },
+      "SuitabilityListOut": {
+        "description": "Per-host suitability for every in-scope host + whether cloud egress is currently allowed.",
+        "properties": {
+          "egress_allowed": {
+            "title": "Egress Allowed",
+            "type": "boolean"
+          },
+          "hosts": {
+            "items": {
+              "$ref": "#/components/schemas/HostSuitabilityOut"
+            },
+            "title": "Hosts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "hosts",
+          "egress_allowed"
+        ],
+        "title": "SuitabilityListOut",
         "type": "object"
       },
       "SupportedType": {
@@ -4119,6 +5360,20 @@
           "file_count"
         ],
         "title": "TreemapNodeOut",
+        "type": "object"
+      },
+      "UnreadCountOut": {
+        "description": "Just the unread count — the cheap poll behind the bell badge.",
+        "properties": {
+          "unread_count": {
+            "title": "Unread Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "unread_count"
+        ],
+        "title": "UnreadCountOut",
         "type": "object"
       },
       "UserOut": {
@@ -5203,6 +6458,72 @@
         ]
       }
     },
+    "/api/v1/agents/scan-lease": {
+      "post": {
+        "description": "Agent-facing (mTLS): GRANT or DEFER this host's scan. Grants-all when the feature is off.",
+        "operationId": "request_scan_lease_api_v1_agents_scan_lease_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Client-Cert-Fingerprint",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Client-Cert-Fingerprint"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Fathom-Proxy-Secret",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fathom-Proxy-Secret"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanLeaseOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Scan Lease",
+        "tags": [
+          "scan-coordinator"
+        ]
+      }
+    },
     "/api/v1/agents/{host_id}/browse": {
       "post": {
         "description": "Operator: list a directory on ``host_id`` live (MANAGE_AGENTS + per-request step-up MFA).\n\nSigns a short-TTL, single-use, host-scoped :class:`BrowseRequest`, enqueues it for the owning\nagent, and returns the metadata listing the agent serves back. Read-only; audited. 503 when the\nbrowse runtime is not provisioned; 504 when the agent does not answer within the request TTL.",
@@ -5299,6 +6620,59 @@
         "summary": "Set Agent Desired Config",
         "tags": [
           "agents"
+        ]
+      }
+    },
+    "/api/v1/agents/{host_id}/scan": {
+      "post": {
+        "description": "Build + sign + enqueue a Scan Now job for one host's agent (operator+; non-destructive).\n\nDispatched over the existing ADR-025 signed-job channel: the orchestrator signs a single-use,\ntime-boxed :class:`~fathom.core.remediation.job.ScanJob` scoped to the host and the agent claims\nit on its next long-poll, verifies it, and runs the scan asynchronously (reporting via the\nnormal ingest path). The endpoint is **non-blocking** — it returns ``202`` with a job id.\n\nGating: ``TRIGGER_METADATA_SCAN`` + scope (a full-bit Scan Now additionally requires\n``TRIGGER_FULLBIT_SCAN``). A scan is non-destructive, so step-up MFA is NOT required. The root\nmust be a known scan root/volume for the host (``422`` otherwise); an unknown host is ``404``.\nIf the signing/dispatch runtime is not provisioned (dispatch not armed) the call ``503``s.",
+        "operationId": "scan_now_api_v1_agents__host_id__scan_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "host_id",
+            "required": true,
+            "schema": {
+              "title": "Host Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanNowRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanDispatchedOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Scan Now",
+        "tags": [
+          "scans"
         ]
       }
     },
@@ -5439,7 +6813,7 @@
     },
     "/api/v1/auth/mfa/enroll": {
       "post": {
-        "description": "Begin TOTP enrollment; the secret is stored by reference, never returned raw.",
+        "description": "Begin TOTP enrollment; the secret is encrypted at rest and only its reference persisted.\n\nP0b / ADR-010: the raw base32 secret is written to the runtime settings store (encrypted with\nthe store's stable key, ADR-038) under a per-enrollment reference, and ``secret_ref`` holds\nonly that reference — never the raw secret. If the store is somehow absent (a degraded boot)\nthe secret falls back into ``secret_ref`` directly, which verify still accepts (legacy path).",
         "operationId": "post_mfa_enroll_api_v1_auth_mfa_enroll_post",
         "responses": {
           "200": {
@@ -5642,6 +7016,48 @@
         "summary": "Get Changes",
         "tags": [
           "read"
+        ]
+      }
+    },
+    "/api/v1/concierge/ask": {
+      "post": {
+        "description": "Answer a natural-language storage question (read-only; scope-enforced).",
+        "operationId": "concierge_ask_api_v1_concierge_ask_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConciergeAskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConciergeAnswerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Concierge Ask",
+        "tags": [
+          "concierge"
         ]
       }
     },
@@ -6392,6 +7808,186 @@
         ]
       }
     },
+    "/api/v1/notifications": {
+      "get": {
+        "description": "List notifications for the bell (newest first, scope-filtered) + the unread count.",
+        "operationId": "list_notifications_api_v1_notifications_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "unread_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Unread Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Notifications",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/api/v1/notifications/mark-all-read": {
+      "post": {
+        "description": "Mark every in-scope unread notification read.",
+        "operationId": "mark_all_read_api_v1_notifications_mark_all_read_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarkReadResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Mark All Read",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/api/v1/notifications/mark-read": {
+      "post": {
+        "description": "Mark specific (in-scope, unread) notifications read.",
+        "operationId": "mark_read_api_v1_notifications_mark_read_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkReadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarkReadResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mark Read",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/api/v1/notifications/test": {
+      "post": {
+        "description": "Send a connectivity test to every ENABLED outbound channel (admin-only); report each outcome.\n\nIgnores the category/severity policy (it is a configuration check, not a real alert) but honours\nthe per-channel enable flags. The secret references (SMTP password, chat webhook/bot token)\nresolve via the in-app secret store (ADR-038). The transport is injectable via\n``app.state.notify_transport`` for tests; production uses the real httpx/SMTP transport.\n\nDeliberately NOT gated on ``notifications_enabled``: an admin verifies channel config *before*\nflipping the master gate on. It only ever contacts channels the admin explicitly enabled.",
+        "operationId": "test_channels_api_v1_notifications_test_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotifyTestResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Test Channels",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/api/v1/notifications/unread-count": {
+      "get": {
+        "description": "The cheap poll behind the bell badge (scope-filtered unread count).",
+        "operationId": "get_unread_count_api_v1_notifications_unread_count_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnreadCountOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Unread Count",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
     "/api/v1/organize/activity": {
       "get": {
         "description": "Summarise recent churn under ``path`` — a read-only \"re-organise?\" hint (ADR-021 Phase 3).\n\nReads the incremental change feed only; nothing is moved and nothing is auto-applied. Gated by\n``organize_enabled`` + ``VIEW_METADATA`` + the server-authoritative scope, like /suggest.",
@@ -6902,6 +8498,56 @@
         ]
       }
     },
+    "/api/v1/scan-coordinator/advisories": {
+      "get": {
+        "description": "Operator (VIEW_METADATA + scope): recent grant/defer events — why deferred, when to retry.",
+        "operationId": "list_scan_advisories_api_v1_scan_coordinator_advisories_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ScanAdvisoryOut"
+                  },
+                  "title": "Response List Scan Advisories Api V1 Scan Coordinator Advisories Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Scan Advisories",
+        "tags": [
+          "scan-coordinator"
+        ]
+      }
+    },
     "/api/v1/scans": {
       "get": {
         "description": "List scan-run history (newest first), scope-filtered; optionally narrowed to one volume.\n\nServer-authoritative scope (ADD 13 §4): a non-global principal sees only snapshots on in-scope\nhosts/volumes, with the system-volume gate (AR-011) applied via ``Volume.kind``. When\n``volume_id`` is given it is scope-checked first so an out-of-scope volume is 403'd, not\nsilently empty.",
@@ -7074,6 +8720,272 @@
         "summary": "Search",
         "tags": [
           "read"
+        ]
+      }
+    },
+    "/api/v1/settings": {
+      "get": {
+        "description": "Return every in-app-manageable setting with its effective value (secrets masked).",
+        "operationId": "list_settings_api_v1_settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Settings",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/v1/settings/secrets": {
+      "put": {
+        "description": "Store a free-form named secret (encrypted at rest) the secret provider resolves by name.",
+        "operationId": "set_named_secret_api_v1_settings_secrets_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSecretRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingMutationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Named Secret",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/v1/settings/secrets/{ref}": {
+      "delete": {
+        "description": "Delete a stored named secret. 404 if no such secret is set.",
+        "operationId": "clear_named_secret_api_v1_settings_secrets__ref__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "ref",
+            "required": true,
+            "schema": {
+              "title": "Ref",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingMutationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Named Secret",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/v1/settings/{key}": {
+      "delete": {
+        "description": "Reset a setting to its env/default value (delete the override). 404 if none was set.",
+        "operationId": "clear_setting_api_v1_settings__key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingMutationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Setting",
+        "tags": [
+          "settings"
+        ]
+      },
+      "put": {
+        "description": "Set or update one setting's in-app override (validated; in-app value wins).\n\nNon-secret by classification, but an *egress-endpoint* key additionally requires fresh step-up\nMFA (``_require_step_up_for_egress``) — changing where a credential is sent is as sensitive as\nrevealing it.",
+        "operationId": "set_setting_api_v1_settings__key__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSettingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingMutationResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Setting",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/v1/settings/{key}/reveal": {
+      "post": {
+        "description": "Return the decrypted value of a stored secret (admin-only + fresh step-up MFA).",
+        "operationId": "reveal_secret_api_v1_settings__key__reveal_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevealSecretOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reveal Secret",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/v1/suitability": {
+      "get": {
+        "description": "Assess every in-scope host against the AI options (traffic-lights + a recommendation).",
+        "operationId": "get_suitability_api_v1_suitability_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuitabilityListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Suitability",
+        "tags": [
+          "suitability"
         ]
       }
     },
@@ -7381,6 +9293,51 @@
       }
     },
     "/api/v1/users/{user_id}/assignments": {
+      "get": {
+        "description": "List a user's role/scope assignments (admin).\n\nRead counterpart to the grant/revoke routes: returns the server-authoritative\n:class:`AssignmentOut` rows the enforcement layer trusts (ADD 13 §§2-3), so an operator can\nreview exactly what a principal has been granted before adding or revoking. Gated on the same\n``MANAGE_USERS`` capability as the rest of the router; 404 for an unknown ``user_id``.",
+        "operationId": "list_assignments_api_v1_users__user_id__assignments_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AssignmentOut"
+                  },
+                  "title": "Response List Assignments Api V1 Users  User Id  Assignments Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Assignments",
+        "tags": [
+          "admin"
+        ]
+      },
       "post": {
         "description": "Grant a ``(role, scope)`` assignment to a user (audited; ADD 13 §8).",
         "operationId": "create_assignment_api_v1_users__user_id__assignments_post",

@@ -117,9 +117,13 @@ def test_build_agent_bundle_templates_config_and_compose() -> None:
     assert "host_id: node-2" in config
     assert "https://proxy:9443/api/v1/agents/ingest" in config
     assert "  - /scan/data" in config and "  - /scan/logs" in config
-    # fullbit scope contains only the fullbit mount.
-    fullbit_section = config.split("fullbit_scope:")[1].split("write_enabled")[0]
+    # fullbit scope contains only the fullbit mount (parse up to the next block, scope_labels).
+    fullbit_section = config.split("fullbit_scope:")[1].split("scope_labels:")[0]
     assert "/scan/data" in fullbit_section and "/scan/logs" not in fullbit_section
+    # ADR-029 relabel: each scan root maps to its real host path (the UI display_name).
+    labels_section = config.split("scope_labels:")[1].split("remote_targets:")[0]
+    assert "'/scan/data': '/mnt/data'" in labels_section
+    assert "'/scan/logs': '/var/log'" in labels_section
     compose = bundle.files["docker-compose.yml"].decode()
     assert "fathom-agent-node-2" in compose
     assert "/mnt/data:/scan/data:ro" in compose

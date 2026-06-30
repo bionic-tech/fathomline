@@ -72,46 +72,54 @@ export function ListingPane({ volumeId, path, onSelect, onOpen }: ListingPanePro
 
   return (
     <section aria-label="Directory listing" className="fathom-listing-pane">
-      <table className="fathom-table">
-        <caption className="sr-only">Entries under {path ?? "—"}</caption>
-        <thead>
-          <tr>
-            {header("name", "Name")}
-            {header("type", "Type")}
-            {header("logical", "Logical")}
-            {header("on_disk", "On-disk")}
-            {header("mtime", "Modified")}
-          </tr>
-        </thead>
-        <tbody>
-          {shown.map((entry) => (
-            <tr key={entry.path}>
-              <td>
-                <button
-                  type="button"
-                  className="fathom-listing-name"
-                  onClick={() => (entry.is_dir ? onOpen(entry) : onSelect(entry))}
-                  title={entry.path}
-                >
-                  {entry.name}
-                  {entry.is_dir ? "/" : ""}
-                </button>{" "}
-                <RiskBadge path={entry.path} name={entry.name} />
-              </td>
-              <td>{entry.is_dir ? "dir" : entry.is_symlink ? "link" : "file"}</td>
-              <td className="tabular-nums">{formatBytes(entry.subtree_size_logical)}</td>
-              <td className="tabular-nums">{formatBytes(entry.subtree_size_on_disk)}</td>
-              <td>{formatUnixTime(entry.mtime)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {rows.length > PAGE ? (
-        <p className="fathom-muted fathom-hint">
-          Showing the {PAGE.toLocaleString()} largest of {rows.length.toLocaleString()} entries —
-          drill into a subfolder to narrow.
+      {tree.isError ? (
+        <p role="alert" className="fathom-inline-error">
+          Couldn't load this directory.
         </p>
-      ) : null}
+      ) : (
+        <>
+          <table className="fathom-table">
+            <caption className="sr-only">Entries under {path ?? "—"}</caption>
+            <thead>
+              <tr>
+                {header("name", "Name")}
+                {header("type", "Type")}
+                {header("logical", "Logical")}
+                {header("on_disk", "On-disk")}
+                {header("mtime", "Modified")}
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((entry) => (
+                <tr key={entry.path}>
+                  <td>
+                    <button
+                      type="button"
+                      className="fathom-listing-name"
+                      onClick={() => (entry.is_dir ? onOpen(entry) : onSelect(entry))}
+                      title={entry.path}
+                    >
+                      {entry.name}
+                      {entry.is_dir ? "/" : ""}
+                    </button>{" "}
+                    <RiskBadge path={entry.path} name={entry.name} />
+                  </td>
+                  <td>{entry.is_dir ? "dir" : entry.is_symlink ? "link" : "file"}</td>
+                  <td className="tabular-nums">{formatBytes(entry.subtree_size_logical)}</td>
+                  <td className="tabular-nums">{formatBytes(entry.subtree_size_on_disk)}</td>
+                  <td>{formatUnixTime(entry.mtime)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {rows.length > PAGE ? (
+            <p className="fathom-muted fathom-hint">
+              Showing the {PAGE.toLocaleString()} largest of {rows.length.toLocaleString()} entries —
+              drill into a subfolder to narrow.
+            </p>
+          ) : null}
+        </>
+      )}
     </section>
   );
 }

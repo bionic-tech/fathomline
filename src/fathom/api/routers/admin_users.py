@@ -15,7 +15,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from fathom.api.auth_deps import PrincipalDep, require
 from fathom.api.deps import SessionDep
@@ -23,7 +24,7 @@ from fathom.auth.models import RoleAssignment, User
 from fathom.auth.passwords import hash_password
 from fathom.auth.principal import Capability, Role
 from fathom.auth.scope import ScopeFilter
-from fathom.core.audit import AuditChain
+from fathom.core.audit_store import build_persistent_chain
 
 router = APIRouter(prefix="/api/v1/users", tags=["admin"])
 
@@ -33,10 +34,24 @@ ManageUsersDep = Annotated[ScopeFilter, Depends(require(Capability.MANAGE_USERS)
 
 _VALID_ROLES = frozenset(r.value for r in Role)
 _VALID_SCOPE_KINDS = frozenset({"global", "host", "volume"})
+_ADMIN = Role.ADMIN.value
 
 
-def _audit(actor: str, action: str, target: str, before: dict[str, object], result: str) -> None:
-    chain = AuditChain(sink=lambda _record: None)
+async def _audit(
+    session: AsyncSession,
+    *,
+    actor: str,
+    action: str,
+    target: str,
+    before: dict[str, object],
+    result: str,
+) -> None:
+    """Append a user-admin event to the durable, hash-chained audit log (one estate-wide chain).
+
+    Wired to the persistent sink (was a no-op): each append stages an audit row on ``session`` so it
+    commits with the request. Auditing the *whole* mutation surface (grants/revokes/creates) is the
+    point of ADD 13 §8 — a silent grant is exactly what the chain exists to make tamper-evident."""
+    chain = await build_persistent_chain(session)
     chain.append(actor=actor, action=action, target=target, before_state=before, result=result)
 
 
@@ -128,7 +143,8 @@ async def create_user(
     )
     session.add(user)
     await session.flush()
-    _audit(
+    await _audit(
+        session,
         actor=principal.subject,
         action="users.create",
         target=body.username,
@@ -165,7 +181,8 @@ async def create_assignment(
     )
     session.add(assignment)
     await session.flush()
-    _audit(
+    await _audit(
+        session,
         actor=principal.subject,
         action="users.grant",
         target=f"user:{user_id}:{body.role}:{body.scope_kind}",
@@ -173,6 +190,31 @@ async def create_assignment(
         result="granted",
     )
     return AssignmentOut.model_validate(assignment, from_attributes=True)
+
+
+@router.get("/{user_id}/assignments", response_model=list[AssignmentOut])
+async def list_assignments(
+    user_id: int,
+    _scope: ManageUsersDep,
+    session: SessionDep,
+) -> list[AssignmentOut]:
+    """List a user's role/scope assignments (admin).
+
+    Read counterpart to the grant/revoke routes: returns the server-authoritative
+    :class:`AssignmentOut` rows the enforcement layer trusts (ADD 13 §§2-3), so an operator can
+    review exactly what a principal has been granted before adding or revoking. Gated on the same
+    ``MANAGE_USERS`` capability as the rest of the router; 404 for an unknown ``user_id``."""
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown user")
+    assignments = (
+        await session.execute(
+            select(RoleAssignment)
+            .where(RoleAssignment.user_id == user_id)
+            .order_by(RoleAssignment.id)
+        )
+    ).scalars().all()
+    return [AssignmentOut.model_validate(a, from_attributes=True) for a in assignments]
 
 
 @router.delete("/{user_id}/assignments/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -187,6 +229,26 @@ async def delete_assignment(
     assignment = await session.get(RoleAssignment, assignment_id)
     if assignment is None or assignment.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown assignment")
+    # Lockout guard: never revoke the LAST global-admin grant in the estate, or no one could ever
+    # manage users/settings again (ADD 13). Refuse with 409 so the operator must grant another admin
+    # first. Counts other global-admin assignments (this one excluded).
+    if assignment.role == _ADMIN and assignment.scope_kind == "global":
+        others = (
+            await session.execute(
+                select(func.count())
+                .select_from(RoleAssignment)
+                .where(
+                    RoleAssignment.role == _ADMIN,
+                    RoleAssignment.scope_kind == "global",
+                    RoleAssignment.id != assignment_id,
+                )
+            )
+        ).scalar_one()
+        if others == 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="cannot revoke the last global admin",
+            )
     before: dict[str, object] = {
         "role": assignment.role,
         "scope_kind": assignment.scope_kind,
@@ -195,7 +257,8 @@ async def delete_assignment(
     }
     await session.delete(assignment)
     await session.flush()
-    _audit(
+    await _audit(
+        session,
         actor=principal.subject,
         action="users.revoke",
         target=f"user:{user_id}:assignment:{assignment_id}",

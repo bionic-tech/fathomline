@@ -351,10 +351,34 @@ class PosixBackend:
 
     @staticmethod
     def _classify_transport(device: str) -> str:
-        """Cheap, reliable-only transport hint; full topology is ADD 04."""
+        """Best-effort medium hint from the backing block device, for the UI's drive-type tag.
+
+        ``nvme`` by device name; ``usb`` / ``sata`` by walking the disk's ``/sys/block`` bus chain
+        (a USB disk has a ``usb*`` ancestor; a SATA one an ``ata*`` ancestor). Network / ZFS / tmpfs
+        etc. don't map to a block bus and return ``unknown`` here -- their ``fs_type`` already says
+        "this is NFS/ZFS", so the tag is right without a transport. Any failure (sandboxed ``/sys``,
+        odd device name) returns ``unknown`` and never raises (full topology is ADD 04).
+        """
         base = Path(device).name
         if base.startswith("nvme"):
             return "nvme"
+        disk = base.rstrip("0123456789")  # strip a partition suffix: sda1 -> sda (the sysfs node)
+        if not disk.startswith(("sd", "hd", "vd")):
+            return "unknown"  # only real block-disk names map cleanly to /sys/block
+        try:
+            syspath = os.path.realpath(f"/sys/block/{disk}")
+        except OSError:
+            return "unknown"
+        return PosixBackend._bus_from_syspath(syspath)
+
+    @staticmethod
+    def _bus_from_syspath(syspath: str) -> str:
+        """Classify a resolved ``/sys/block/<disk>`` path into a bus transport (pure; tested)."""
+        parts = syspath.lower().split("/")
+        if any(p.startswith("usb") for p in parts):
+            return "usb"
+        if any(p.startswith("ata") for p in parts):
+            return "sata"
         return "unknown"
 
     @staticmethod

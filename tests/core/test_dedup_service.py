@@ -315,3 +315,37 @@ async def test_all_alias_group_reclaims_nothing(session: AsyncSession) -> None:
     assert len(groups) == 1
     assert groups[0].reclaimable_bytes == 0
     assert all(m.is_mount_alias for m in groups[0].members)
+
+
+async def test_zero_size_duplicates_reclaim_nothing(session: AsyncSession) -> None:
+    # EC-dedup-2: two empty (size-0) files DO share one hash and form a group, but removing a copy
+    # frees no space — reclaimable_bytes is size * (members - 1) == 0 * 1 == 0.
+    vol = await _seed_volume(session)
+    await _add_entry(session, vol, path="/mnt/pool/empty1", inode=70, size=0, full_hash=_h("0"))
+    await _add_entry(session, vol, path="/mnt/pool/empty2", inode=71, size=0, full_hash=_h("0"))
+    groups = await DedupService(session).build()
+    assert len(groups) == 1
+    g = groups[0]
+    assert g.member_count == 2  # the group still forms (two copies share the hash)
+    assert g.size == 0
+    assert g.reclaimable_bytes == 0  # but nothing is reclaimable
+
+
+async def test_hashed_directory_row_excluded_from_group(session: AsyncSession) -> None:
+    # EC-dedup-13: a DIRECTORY row that happens to carry a full_hash matching two files is never a
+    # group member — a hashed dir is not a reclaimable file (mirrors the is_dir.is_(False) filter in
+    # _load_hashed_entries). The group is the two files only.
+    vol = await _seed_volume(session)
+    h = _h("d")
+    await _add_entry(session, vol, path="/mnt/pool/file1", inode=80, size=100, full_hash=h)
+    await _add_entry(session, vol, path="/mnt/pool/file2", inode=81, size=100, full_hash=h)
+    a_dir = await _add_entry(session, vol, path="/mnt/pool/dir", inode=82, size=100, full_hash=h)
+    a_dir.is_dir = True
+    await session.flush()
+
+    groups = await DedupService(session).build()
+    assert len(groups) == 1
+    g = groups[0]
+    assert g.member_count == 2
+    assert {m.path for m in g.members} == {"/mnt/pool/file1", "/mnt/pool/file2"}
+    assert "/mnt/pool/dir" not in {m.path for m in g.members}  # the hashed dir is excluded

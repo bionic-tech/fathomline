@@ -23,6 +23,7 @@ from fathom.auth.principal import Capability
 from fathom.auth.scope import ScopeFilter
 from fathom.core import query
 from fathom.core.reconcile import ReconcileService
+from fathom.core.reconcile.service import ReconcileTimeoutError, ReconcileTooLargeError
 
 router = APIRouter(prefix="/api/v1", tags=["reconcile"])
 
@@ -44,13 +45,39 @@ async def reconcile(
     def_root = _require_root_in_volume(body.definitive_path, def_vol)
     cmp_root = _require_root_in_volume(body.comparison_path, cmp_vol)
 
-    result = await ReconcileService(session).compare(
-        definitive_volume_id=body.definitive_volume_id,
-        definitive_root=def_root,
-        comparison_volume_id=body.comparison_volume_id,
-        comparison_root=cmp_root,
-        scope=scope,
-    )
+    try:
+        result = await ReconcileService(session).compare(
+            definitive_volume_id=body.definitive_volume_id,
+            definitive_root=def_root,
+            comparison_volume_id=body.comparison_volume_id,
+            comparison_root=cmp_root,
+            scope=scope,
+        )
+    except ReconcileTooLargeError as exc:
+        # Reconcile aligns files by their RELATIVE path, so it's for two copies of the same folder —
+        # not two whole pools. Name the offending side(s) and point at the fix (narrow the scope).
+        sides = []
+        if exc.definitive_count > exc.cap:
+            sides.append("the definitive folder")
+        if exc.comparison_count > exc.cap:
+            sides.append("the comparison folder")
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=(
+                f"Too large to compare in one pass — {' and '.join(sides)} holds more than "
+                f"{exc.cap:,} files. Reconcile matches files by their path within each folder, so "
+                f"compare two copies of the SAME folder: narrow each side to the matching "
+                f"subfolder (e.g. /scan/tank/Media vs /scan/data/Media) and try again."
+            ),
+        ) from exc
+    except ReconcileTimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=(
+                "That comparison took too long and was stopped. Narrow each side to a smaller "
+                "matching subfolder and try again."
+            ),
+        ) from exc
     return ReconcileOut(
         definitive_volume_id=result.definitive_volume_id,
         definitive_root=result.definitive_root,

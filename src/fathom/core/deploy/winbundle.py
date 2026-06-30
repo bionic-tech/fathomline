@@ -1,4 +1,4 @@
-"""Windows agent bundle generation (ADR-027 phase W1; sibling of :mod:`bundle`).
+"""Windows agent bundle generation (ADR-027; metadata W1 + full-bit W2; sibling of :mod:`bundle`).
 
 The Linux bundle is Docker-shaped (``docker-compose.yml`` + ``docker compose up``). The Windows
 W1 agent runs **natively** — no container — so its bundle is a different shape and lives here,
@@ -68,7 +68,8 @@ def windows_ingest_url(ingest_url: str, proxy_host_ip: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class WindowsScanPath:
-    """One Windows scan root. ``fullbit`` is carried for forward-compat; W1 is metadata-only."""
+    """One Windows scan root. ``fullbit=True`` adds it to ``fullbit_scope`` (content hashing,
+    ADR-027 W2 — local-only, never hydrates cloud placeholders); default is metadata-only."""
 
     path: str
     fullbit: bool = False
@@ -125,9 +126,18 @@ def _ps_sq(value: str) -> str:
 
 def _render_config(spec: WindowsBundleSpec) -> str:
     scan_block = "\n".join(f"  - {_yaml_sq(sp.path)}" for sp in spec.scan_paths)
+    # Full-bit (content hashing) roots — the scan paths flagged ``fullbit``. The native backend
+    # hashes LOCAL files but never hydrates a cloud placeholder (ADR-027 W2). Empty list when none.
+    fullbit_paths = [sp for sp in spec.scan_paths if sp.fullbit]
+    fullbit_block = (
+        "fullbit_scope:\n" + "\n".join(f"  - {_yaml_sq(sp.path)}" for sp in fullbit_paths)
+        if fullbit_paths
+        else "fullbit_scope: []"
+    )
     certs = spec.install_dir.rstrip("\\") + "\\certs"
-    return f"""# Fathomline Windows agent config for {spec.host_id} — generated (ADR-027 W1).
-# Read-only, metadata-only (full-bit is phase W2); pushes to core over CA-pinned mTLS.
+    return f"""# Fathomline Windows agent config for {spec.host_id} — generated (ADR-027).
+# Read-only: metadata always; full-bit (content) for fullbit_scope, local-only and never
+# hydrating cloud placeholders. Pushes to core over CA-pinned mTLS.
 host_id: {spec.host_id}
 ingest_url: {spec.ingest_url}
 client_cert_path: {_yaml_sq(certs + chr(92) + "client.crt")}
@@ -135,7 +145,7 @@ client_key_path:  {_yaml_sq(certs + chr(92) + "client.key")}
 server_ca_path:   {_yaml_sq(certs + chr(92) + "fathom-ca.crt")}
 scan_scope:
 {scan_block}
-fullbit_scope: []
+{fullbit_block}
 write_enabled: false
 cross_mounts: false
 throttle:

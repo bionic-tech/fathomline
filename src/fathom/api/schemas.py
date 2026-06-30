@@ -8,8 +8,24 @@ without re-validating it (AR-0012).
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+
+
+class HostFactsFrame(BaseModel):
+    """Hardware facts an agent probes (ADR-037) — all optional, best-effort, never sensitive.
+
+    Used by the suitability engine to rate AI options per host. Bounded so a malformed/oversized
+    agent report can never bloat the catalogue.
+    """
+
+    cpu_cores: int | None = Field(default=None, ge=0, le=4096)
+    cpu_model: str | None = Field(default=None, max_length=255)
+    ram_bytes: int | None = Field(default=None, ge=0)
+    gpu_name: str | None = Field(default=None, max_length=255)
+    gpu_vram_bytes: int | None = Field(default=None, ge=0)
+    arch: str | None = Field(default=None, max_length=64)
 
 
 class HostFrame(BaseModel):
@@ -18,6 +34,9 @@ class HostFrame(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     os: str | None = Field(default=None, max_length=255)
     agent_version: str | None = Field(default=None, max_length=64)
+    # Optional hardware facts (ADR-037); a pre-facts agent omits this and the catalogue keeps any
+    # previously reported facts (never overwritten with null).
+    facts: HostFactsFrame | None = Field(default=None)
 
 
 class VolumeFrame(BaseModel):
@@ -85,16 +104,34 @@ class EntryFrame(BaseModel):
         return self
 
 
+class RemovedEntryIn(BaseModel):
+    """One explicit deletion the incremental change feed observed, keyed on ``(dev, inode)``.
+
+    The removal key matches the catalogue identity ``(host, volume, dev, inode)`` so a removal on a
+    ``cross_mounts`` volume — where ZFS child datasets reuse low inode numbers — flips ONLY the
+    right device's row, never a colliding inode on another dataset. ``dev`` (st_dev) defaults to 0
+    for single-filesystem / remote backends, where inode alone is already unique.
+    """
+
+    dev: int = 0
+    inode: int
+
+
 class IngestBatch(BaseModel):
     """A single resumable, idempotent push from an agent (ADD 02 §7.2).
 
-    ``removed_inodes`` carries the **explicit** deletions the incremental change feed detected
-    (incremental owner ruling: an explicit present/removed_at marker, NOT snapshot-staleness
-    inference). The server marks those ``(host_id, volume_id, inode)`` rows ``present=False`` and
-    emits a ``DELETE`` change_log row — it never deletes the catalogue row. Re-appearing inodes
-    resurrect on the next upsert. A metadata batch may carry removals; a fullbit batch never does
-    (full-bit re-hashes existing files, it does not detect deletions). The list is bounded by the
-    same per-batch limit as ``entries`` so a malformed batch cannot blow up the reconcile step.
+    ``removed`` carries the **explicit** deletions the incremental change feed detected, each keyed
+    on ``(dev, inode)`` (incremental owner ruling: an explicit present/removed_at marker, NOT
+    snapshot-staleness inference). The server marks those ``(host_id, volume_id, dev, inode)`` rows
+    ``present=False`` and emits a ``DELETE`` change_log row — it never deletes the catalogue row.
+    Re-appearing inodes resurrect on the next upsert. A metadata batch may carry removals; a fullbit
+    batch never does (full-bit re-hashes existing files, it does not detect deletions).
+
+    ``removed_inodes`` is the **DEPRECATED** legacy fallback an old (pre-(dev,inode)) agent sends:
+    inode-only removals. It is consulted ONLY when ``removed`` is empty/absent, and an inode-only
+    key can collide across ZFS child datasets on a ``cross_mounts`` volume (the very bug ``removed``
+    fixes) — so new agents send ``removed`` instead. Both lists are bounded by the same per-batch
+    limit as ``entries`` so a malformed batch cannot blow up the reconcile step.
     """
 
     host: HostFrame
@@ -102,6 +139,9 @@ class IngestBatch(BaseModel):
     mode: str = Field(pattern="^(metadata|fullbit)$")
     snapshot_id: int | None = None  # None → open a new snapshot
     entries: list[EntryFrame] = Field(default_factory=list)
+    removed: list[RemovedEntryIn] = Field(default_factory=list)
+    # DEPRECATED: inode-only removals from a pre-(dev,inode) agent; used only when ``removed`` is
+    # empty (see the class docstring). Kept for backward compatibility with older agents.
     removed_inodes: list[int] = Field(default_factory=list)
 
 
@@ -428,6 +468,28 @@ class ScanCreatedOut(BaseModel):
     mode: str
 
 
+class ScanNowRequest(BaseModel):
+    """Operator request to run a scan NOW on one host's agent (Scan Now, P3).
+
+    Non-destructive: it asks the agent to immediately scan one of its configured scan roots. The
+    ``root`` is re-validated server-side against the host's catalogued volumes (a client-named path
+    that is not a registered scan root is refused), and the request is dispatched over the existing
+    signed-job channel — the agent verifies signature + nonce + expiry + scope before scanning.
+    """
+
+    root: str = Field(min_length=1, max_length=4096)
+    mode: Literal["metadata", "fullbit"]
+
+
+class ScanDispatchedOut(BaseModel):
+    """Acknowledgement that a Scan Now job was signed + enqueued (the agent runs it async)."""
+
+    job_id: str
+    host: str
+    root: str
+    mode: str
+
+
 class SnapshotOut(BaseModel):
     """One immutable scan-run row for the Scans tab (GET /api/v1/scans).
 
@@ -648,14 +710,190 @@ class ServerConfigOut(BaseModel):
 
     organize_enabled: bool
     inference_provider: str
+    inference_model: str
     inference_ollama_url: str
-    organize_model: str
+    organize_model: str | None
     inference_allow_egress: bool
     inference_timeout_seconds: float
     remediation_enabled: bool
     remediation_blast_cap: int
     preview_enabled: bool
     change_log_retention_days: int
+    concierge_enabled: bool
+    concierge_model: str | None
+    concierge_embeddings_enabled: bool
+    scan_coordinator_enabled: bool
+    notifications_enabled: bool
+    onboarding_completed: bool
+
+
+# --- Notification Center (ADR-031) -------------------------------------------------------
+
+
+class NotificationOut(BaseModel):
+    """One in-app notification for the bell panel."""
+
+    id: int
+    category: str  # recommendation | problem | activity | security
+    severity: str  # info | warning | critical
+    title: str
+    body: str
+    source: str
+    host_id: int | None = None
+    volume_id: int | None = None
+    created_at: datetime
+    read: bool
+
+
+class NotificationListOut(BaseModel):
+    """A page of notifications plus the current unread count (for the bell badge)."""
+
+    items: list[NotificationOut]
+    unread_count: int
+
+
+class UnreadCountOut(BaseModel):
+    """Just the unread count — the cheap poll behind the bell badge."""
+
+    unread_count: int
+
+
+class MarkReadRequest(BaseModel):
+    """Mark specific notifications read (empty list is a no-op; use mark-all-read for all)."""
+
+    ids: list[int] = Field(default_factory=list, max_length=1000)
+
+
+class MarkReadResult(BaseModel):
+    """How many notifications were newly marked read."""
+
+    marked: int
+
+
+class NotifyChannelResult(BaseModel):
+    """The outcome of one outbound channel send (the test endpoint)."""
+
+    channel: str
+    ok: bool
+    detail: str = ""
+
+
+class NotifyTestResult(BaseModel):
+    """Per-channel results of a notification channel connectivity test."""
+
+    results: list[NotifyChannelResult]
+
+
+# --- Suitability / onboarding (ADR-037) --------------------------------------------------
+
+
+class HostFactsOut(BaseModel):
+    """A host's reported hardware facts (ADR-037; any field may be null)."""
+
+    cpu_cores: int | None = None
+    cpu_model: str | None = None
+    ram_bytes: int | None = None
+    gpu_name: str | None = None
+    gpu_vram_bytes: int | None = None
+    arch: str | None = None
+
+
+class OptionAssessmentOut(BaseModel):
+    """One AI option's traffic-light rating for a host."""
+
+    key: str
+    label: str
+    rating: str  # green | amber | red
+    reason: str
+
+
+class HostSuitabilityOut(BaseModel):
+    """A host's full suitability assessment + the recommended concrete AI settings."""
+
+    host_id: int
+    name: str
+    facts_known: bool
+    facts: HostFactsOut | None = None
+    options: list[OptionAssessmentOut]
+    recommendation: str
+    recommended_chat_provider: str
+    recommended_chat_model: str | None
+    recommended_embedder: str
+    recommended_embedding_dim: int | None
+
+
+class SuitabilityListOut(BaseModel):
+    """Per-host suitability for every in-scope host + whether cloud egress is currently allowed."""
+
+    hosts: list[HostSuitabilityOut]
+    egress_allowed: bool
+
+
+# --- Runtime settings store (ADR-038) ----------------------------------------------------
+
+
+class SettingOut(BaseModel):
+    """One in-app-manageable setting: its policy + the effective value (secrets masked)."""
+
+    key: str
+    category: str
+    type: str  # bool | int | float | str | list
+    editable: bool
+    is_secret: bool
+    restart_required: bool
+    help: str
+    overridden: bool  # an in-app override is set (vs the env/default value)
+    is_set: bool  # for a secret: whether any value exists at all
+    # The effective value for a non-secret setting; always null for a secret (never exposed here).
+    value: JsonValue = None
+    # Human label ('Inference Provider'); the key is shown secondary in the UI.
+    label: str
+    # A closed value set → render a strict dropdown (e.g. ollama|openai|anthropic); null = free.
+    options: list[str] | None = None
+    # An open value set → render a free-text combobox with these as datalist hints (e.g. Ollama
+    # model tags). Mutually exclusive with options; null = plain free input.
+    suggestions: list[str] | None = None
+    # Whether this setting currently applies given other settings' values (UI hides it if not).
+    relevant: bool = True
+    relevant_hint: str | None = None  # why it's inapplicable (shown when relevant is false)
+    advanced: bool = False  # tuck behind an "Advanced" disclosure in the UI
+
+
+class SettingsListOut(BaseModel):
+    """The full settings read surface for the admin Settings page."""
+
+    settings: list[SettingOut]
+    named_secrets: list[str]  # free-form secret references stored in-app (names only)
+    version: int  # the override-set version (bumped on every mutation)
+
+
+class SetSettingRequest(BaseModel):
+    """Set or update one setting's in-app override (in-app value wins over the env default)."""
+
+    value: JsonValue
+
+
+class SetSecretRequest(BaseModel):
+    """Store a free-form named secret (a secret-backend reference value), encrypted at rest."""
+
+    ref: str = Field(min_length=1, max_length=128)
+    value: str = Field(min_length=1, max_length=8192)
+
+
+class RevealSecretOut(BaseModel):
+    """The decrypted secret value (admin-only, step-up-MFA-gated reveal)."""
+
+    key: str
+    value: str
+
+
+class SettingMutationResult(BaseModel):
+    """Acknowledgement of a settings mutation + whether a restart is needed for full effect."""
+
+    key: str
+    overridden: bool
+    restart_required: bool
+    version: int
 
 
 class ReconcileRequest(BaseModel):
@@ -706,3 +944,89 @@ class OrganizeActivityOut(BaseModel):
     deleted: int
     capped: bool  # True when the change count hit the scan limit (so counts are a lower bound)
     suggests_reorganise: bool
+
+
+# --- AI Concierge (ADR-035): natural-language Q&A over the catalogue (read-only) ----------
+
+
+class ConciergeTurn(BaseModel):
+    """One prior turn of the conversation, supplied so follow-ups resolve (memory; ADR-035)."""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class ConciergeAskRequest(BaseModel):
+    """A natural-language question for the concierge, with optional host/volume + page hints."""
+
+    question: str = Field(min_length=1, max_length=1000)
+    volume_id: int | None = Field(default=None, ge=1)
+    host_id: int | None = Field(default=None, ge=1)
+    # The page/view the user is on when they ask (e.g. "duplicates", "dashboard"). A soft hint that
+    # biases an ambiguous question toward that context; the concierge still answers cross-page
+    # questions and stays scoped to the storage estate either way (ADR-035).
+    page: str | None = Field(default=None, max_length=64)
+    # Recent conversation turns (client-held memory) — used only to resolve follow-ups in classify;
+    # capped server-side. The newest turns matter; older ones are dropped.
+    history: list[ConciergeTurn] = Field(default_factory=list, max_length=20)
+    # A deterministic /command from the UI: when set, the server skips the LLM classify and runs
+    # this tool directly (still a closed-enum tool, still scope-filtered). Validated to the enum.
+    tool: str | None = Field(default=None, max_length=32)
+
+
+class ConciergeCitationOut(BaseModel):
+    """A server-built reference to a real result row the answer is grounded in (never the LLM's)."""
+
+    label: str
+    path: str | None = None
+    entry_id: int | None = None
+    host_id: int | None = None
+    volume_id: int | None = None
+
+
+class ConciergeActionOut(BaseModel):
+    """A suggested next step the UI renders as a button — navigation to a (separately gated) page.
+    The concierge never executes mutations; this only routes the user to the relevant tool."""
+
+    label: str
+    route: str
+    volume_id: int | None = None
+
+
+class ConciergeAnswerOut(BaseModel):
+    """A concierge answer: the prose, the tool the model chose, grounded citations + next steps."""
+
+    answer: str
+    tool: str
+    considered: int
+    citations: list[ConciergeCitationOut]
+    actions: list[ConciergeActionOut] = Field(default_factory=list)
+
+
+# --- Scan concurrency coordinator (ADR-036) ----------------------------------------------
+
+
+class ScanLeaseOut(BaseModel):
+    """The coordinator's verdict for an agent's pre-scan lease request.
+
+    ``granted`` True ⇒ run now. False ⇒ defer: ``reason`` explains why, ``blocking_host`` names the
+    host whose heavy scan is in progress, ``retry_after_seconds`` advises when to retry.
+    """
+
+    granted: bool
+    status: str  # "active" | "deferred"
+    reason: str | None = None
+    retry_after_seconds: int | None = None
+    blocking_host: str | None = None
+
+
+class ScanAdvisoryOut(BaseModel):
+    """One coordinator event for the operator read surface (why a scan deferred / lease state)."""
+
+    host_name: str
+    status: str
+    is_heavy: bool
+    reason: str | None = None
+    blocking_host: str | None = None
+    retry_after_seconds: int | None = None
+    granted_at: datetime

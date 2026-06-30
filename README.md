@@ -1,4 +1,15 @@
+<div align="center">
+
+<!-- Primary mark — photoreal device hero (assets/brand/fathomline-logo.jpeg, 2048²). -->
+<img src="assets/brand/fathomline-logo.jpeg" alt="Fathomline" width="480" />
+
 # Fathomline
+
+**Fathomline — sound out your storage estate.**
+
+_by **Bionic Technologies** · built on the **Fathom** engine · [AGPL-3.0](LICENSE)_
+
+</div>
 
 > **Where did all the disk space go — across every machine you run?**
 > Fathomline is the storage-estate analyzer: it scans your whole estate (NAS, servers,
@@ -8,7 +19,7 @@
 > *A fathomline is the weighted rope sailors lowered to measure the deep. Drop one into your
 > storage and learn what's really down there.*
 
-[![CI](https://github.com/bionic-technologies/fathomline/actions/workflows/ci.yml/badge.svg)](https://github.com/bionic-technologies/fathomline/actions/workflows/ci.yml)
+[![CI](https://github.com/bionic-tech/fathomline/actions/workflows/ci.yml/badge.svg)](https://github.com/bionic-tech/fathomline/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%203.0-blue.svg)](LICENSE)
 [![coverage ≥ 85%](https://img.shields.io/badge/coverage-%E2%89%A585%25-brightgreen)](.github/workflows/ci.yml)
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
@@ -36,6 +47,16 @@ nightly backups of things that are already backed up twice.
 
 *(Live captures from a seeded local instance — regenerate any time with
 `scripts/localdev/run.sh` + `node scripts/localdev/screenshot.mjs`.)*
+
+## The story
+
+A *fathomline* is the weighted, knotted rope sailors dropped over the side to sound out how deep
+the water really was. Most disk tools measure a single machine — which, across a real estate, is
+like measuring a puddle while you're standing in a lake. Fathomline sounds out the **whole** estate
+instead, and treats your data as something to protect first: read-only by default, with any cleanup
+strictly opt-in, reversible and audited. It's free and open source, by Bionic Technologies.
+
+Read the full story → [docs/STORY.md](docs/STORY.md)
 
 ## Features
 
@@ -68,7 +89,7 @@ No fleet, no Postgres, no certificates — a full Fathomline on SQLite, populate
 scanning a couple of local directories so every page shows genuine data:
 
 ```bash
-git clone https://github.com/bionic-technologies/fathomline && cd fathomline
+git clone https://github.com/bionic-tech/fathomline && cd fathomline
 scripts/localdev/run.sh
 ```
 

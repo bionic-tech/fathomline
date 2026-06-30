@@ -86,7 +86,7 @@ def test_build_windows_bundle_shape_and_no_docker() -> None:
     # Cert paths point inside the install dir, also single-quoted.
     assert "'C:\\ProgramData\\Fathomline\\certs\\client.crt'" in config
     assert "write_enabled: false" in config
-    assert "fullbit_scope: []" in config  # W1 is metadata-only
+    assert "fullbit_scope: []" in config  # no fullbit paths here → metadata-only
 
     install = bundle.files["install-agent.ps1"].decode()
     assert "Register-ScheduledTask" in install
@@ -99,6 +99,27 @@ def test_build_windows_bundle_shape_and_no_docker() -> None:
     assert "fathom.agent" in runner
 
     assert bundle.files["certs/client.key"] == minted.key_pem.encode()
+
+
+def test_build_windows_bundle_emits_fullbit_scope_for_flagged_paths() -> None:
+    # A scan path flagged ``fullbit`` lands in fullbit_scope (ADR-027 W2 content hashing); an
+    # unflagged one stays metadata-only — so the two scopes can differ within one bundle.
+    cert_pem, key_pem = make_test_ca()
+    minted = CertificateAuthority.from_pem(cert_pem=cert_pem, key_pem=key_pem).mint_client_cert(
+        "win-1-agent", days=10
+    )
+    spec = _wspec(
+        scan_paths=(
+            WindowsScanPath("D:\\Media", fullbit=True),
+            WindowsScanPath("C:\\Windows"),  # metadata-only
+        )
+    )
+    config = build_windows_agent_bundle(spec, minted).files["agent.config.yaml"].decode()
+    assert "fullbit_scope:\n  - 'D:\\Media'" in config
+    assert "fullbit_scope: []" not in config
+    # The metadata-only path is in scan_scope but NOT fullbit_scope.
+    assert "  - 'C:\\Windows'" in config
+    assert "  - 'C:\\Windows'" not in config.split("fullbit_scope:")[1]
 
 
 # ----------------------------------------------------------------- spec validation (fail-closed)

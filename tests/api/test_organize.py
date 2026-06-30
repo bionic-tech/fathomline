@@ -234,7 +234,8 @@ async def test_suggest_enabled_returns_proposal(
     # Inject the fake provider so the route never reaches a real model.
     proposal = _LlmProposal(assignments=[_Assignment(index=i, target_dir="tidy") for i in range(3)])
     monkeypatch.setattr(
-        "fathom.api.routers.organize.build_inference_provider", lambda _s: _FakeProvider(proposal)
+        "fathom.api.routers.organize.build_inference_provider",
+        lambda _s, *, model=None, secret_provider=None: _FakeProvider(proposal),
     )
     r = await organize_client.post(
         "/api/v1/agents/ingest", json=batch(), headers=FINGERPRINT_HEADER
@@ -255,7 +256,7 @@ async def test_suggest_out_of_scope_403(
 ) -> None:
     monkeypatch.setattr(
         "fathom.api.routers.organize.build_inference_provider",
-        lambda _s: _FakeProvider(_LlmProposal()),
+        lambda _s, *, model=None, secret_provider=None: _FakeProvider(_LlmProposal()),
     )
     r = await organize_client.post(
         "/api/v1/agents/ingest", json=batch(), headers=FINGERPRINT_HEADER
@@ -264,6 +265,60 @@ async def test_suggest_out_of_scope_403(
     scoped = await seed_principal(username="scoped", scope_kind="volume", volume_id=vol + 999)
     resp = await organize_client.post(
         "/api/v1/organize/suggest", json={"volume_id": vol, "path": "/mnt/pool"}, headers=scoped
+    )
+    assert resp.status_code == 403
+
+
+async def test_suggest_nonexistent_volume_404(
+    organize_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EC-organize-ai-25: a NONEXISTENT volume is 404 (vs out-of-scope 403, above).
+
+    A global admin (in scope for everything) requesting a volume id that does not exist must get
+    404 'unknown volume' — the absent-vs-forbidden boundary `get_volume_in_scope` draws: None for
+    absent (404), raise for out-of-scope (403). The 404 fires before any provider build.
+    """
+    monkeypatch.setattr(
+        "fathom.api.routers.organize.build_inference_provider",
+        lambda _s, *, model=None, secret_provider=None: _FakeProvider(_LlmProposal()),
+    )
+    r = await organize_client.post(
+        "/api/v1/agents/ingest", json=batch(), headers=FINGERPRINT_HEADER
+    )
+    vol = r.json()["volume_id"]
+    auth = await seed_principal()  # global admin → in scope for everything
+    resp = await organize_client.post(
+        "/api/v1/organize/suggest",
+        json={"volume_id": vol + 999, "path": "/mnt/pool"},
+        headers=auth,
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == "unknown volume"
+
+
+async def test_activity_nonexistent_volume_404(organize_client: httpx.AsyncClient) -> None:
+    """A global admin asking for activity on an absent volume → 404 (not 403)."""
+    auth = await seed_principal()
+    resp = await organize_client.get(
+        "/api/v1/organize/activity",
+        params={"volume_id": 999999, "path": "/mnt/pool"},
+        headers=auth,
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == "unknown volume"
+
+
+async def test_activity_out_of_scope_403(organize_client: httpx.AsyncClient) -> None:
+    """An existing volume the principal can't see → 403 (existence acknowledged, access denied)."""
+    r = await organize_client.post(
+        "/api/v1/agents/ingest", json=batch(), headers=FINGERPRINT_HEADER
+    )
+    vol = r.json()["volume_id"]
+    scoped = await seed_principal(username="scopedact", scope_kind="volume", volume_id=vol + 999)
+    resp = await organize_client.get(
+        "/api/v1/organize/activity",
+        params={"volume_id": vol, "path": "/mnt/pool"},
+        headers=scoped,
     )
     assert resp.status_code == 403
 
@@ -340,3 +395,148 @@ async def test_activity_disabled_by_default(api_client: httpx.AsyncClient) -> No
         headers=auth,
     )
     assert resp.status_code == 403  # organize_enabled=False on the default app (gate before lookup)
+
+
+# --- coverage close: auth, inference-error mapping, empty-folder short-circuit, param matrix ----
+
+
+class _NeverCalledProvider:
+    """Fails the test if asked to complete — proves the read path short-circuited first."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, *, system: str, user: str, schema: object) -> _LlmProposal:
+        self.calls += 1
+        raise AssertionError("provider.complete must not be called")
+
+
+class _InferenceErrorProvider:
+    """Raises a typed InferenceError on complete — drives the route's sanitised status mapping."""
+
+    def __init__(self, status_code: int) -> None:
+        self._status = status_code
+
+    async def complete(self, *, system: str, user: str, schema: object) -> _LlmProposal:
+        from fathom.inference import InferenceError
+
+        raise InferenceError("model blew up", status_code=self._status)
+
+
+async def test_suggest_without_session_401(organize_client: httpx.AsyncClient) -> None:
+    """EC-organize-ai-12: no session → 401 (deny-by-default at the auth dep, before any gate)."""
+    resp = await organize_client.post(
+        "/api/v1/organize/suggest", json={"volume_id": 1, "path": "/mnt/pool"}
+    )
+    assert resp.status_code == 401, resp.text
+
+
+async def test_suggest_inference_error_maps_504(
+    organize_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EC-organize-ai-18: an InferenceError(504) is mapped to 504 with a sanitised detail.
+
+    The route surfaces ``exc.status_code`` verbatim (not a fixed 503) and replaces the message with
+    the constant "inference unavailable" so no provider internals leak.
+    """
+    monkeypatch.setattr(
+        "fathom.api.routers.organize.build_inference_provider",
+        lambda _s, *, model=None, secret_provider=None: _InferenceErrorProvider(504),
+    )
+    r = await organize_client.post(
+        "/api/v1/agents/ingest", json=batch(), headers=FINGERPRINT_HEADER
+    )
+    vol = r.json()["volume_id"]
+    auth = await seed_principal()
+    resp = await organize_client.post(
+        "/api/v1/organize/suggest", json={"volume_id": vol, "path": "/mnt/pool"}, headers=auth
+    )
+    assert resp.status_code == 504, resp.text
+    assert resp.json()["detail"] == "inference unavailable"
+
+
+async def test_suggest_empty_folder_never_calls_model(
+    organize_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EC-organize-ai-1: an empty folder → 200, considered==0, items==[], provider never called.
+
+    The service short-circuits before any model call when no catalogue entries fall under the root,
+    so an Organize suggestion over an empty sub-folder costs nothing and proposes nothing.
+    """
+    provider = _NeverCalledProvider()
+    monkeypatch.setattr(
+        "fathom.api.routers.organize.build_inference_provider",
+        lambda _s, *, model=None, secret_provider=None: provider,
+    )
+    r = await organize_client.post(
+        "/api/v1/agents/ingest", json=batch(), headers=FINGERPRINT_HEADER
+    )
+    vol = r.json()["volume_id"]
+    auth = await seed_principal()
+    # A real, in-volume sub-folder that holds no catalogued files (seeded files live under movies/).
+    resp = await organize_client.post(
+        "/api/v1/organize/suggest",
+        json={"volume_id": vol, "path": "/mnt/pool/empty-subdir"},
+        headers=auth,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["considered"] == 0
+    assert body["items"] == []
+    assert provider.calls == 0  # the model was never asked
+
+
+@pytest.mark.parametrize(
+    "bad_body",
+    [
+        {"volume_id": 0, "path": "/mnt/pool"},  # volume_id ge=1
+        {"volume_id": 1, "path": ""},  # path min_length=1
+        {"volume_id": 1, "path": "/mnt/pool", "max_files": 0},  # max_files ge=1
+        {"volume_id": 1, "path": "/mnt/pool", "max_files": 201},  # max_files le=200
+    ],
+)
+async def test_suggest_param_validation_422(
+    organize_client: httpx.AsyncClient, bad_body: dict[str, object]
+) -> None:
+    """EC-organize-ai-14: boundary validation rejects out-of-range params with 422 (auth valid)."""
+    auth = await seed_principal()
+    resp = await organize_client.post("/api/v1/organize/suggest", json=bad_body, headers=auth)
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize(
+    "bad_params",
+    [
+        {"volume_id": 0, "path": "/mnt/pool"},  # volume_id ge=1
+        {"volume_id": 1, "path": ""},  # path min_length=1
+        {"volume_id": 1, "path": "/mnt/pool", "since_hours": 0},  # since_hours ge=1
+        {"volume_id": 1, "path": "/mnt/pool", "since_hours": 721},  # since_hours le=720
+    ],
+)
+async def test_activity_param_validation_422(
+    organize_client: httpx.AsyncClient, bad_params: dict[str, object]
+) -> None:
+    """EC-organize-ai-14: the activity query params are bounded (since_hours 1..720) → 422."""
+    auth = await seed_principal()
+    resp = await organize_client.get("/api/v1/organize/activity", params=bad_params, headers=auth)
+    assert resp.status_code == 422, resp.text
+
+
+async def test_activity_capped_at_scan_limit(organize_client: httpx.AsyncClient) -> None:
+    """EC-organize-ai-19: at/above the scan limit (500) the count is capped (a lower bound).
+
+    With 500 matching change rows in the window, ``get_changes`` returns exactly the limit, so the
+    route flags ``capped=True`` — the UI must show the counts as "at least", not exact.
+    """
+    rows = [(f"/mnt/pool/movies/f{i}.bin", "create") for i in range(500)]
+    vol = await _seed_volume_with_changes(rows)
+    auth = await seed_principal()
+    resp = await organize_client.get(
+        "/api/v1/organize/activity",
+        params={"volume_id": vol, "path": "/mnt/pool/movies"},
+        headers=auth,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["capped"] is True
+    assert body["created"] == 500  # the scan ceiling; real churn may be higher

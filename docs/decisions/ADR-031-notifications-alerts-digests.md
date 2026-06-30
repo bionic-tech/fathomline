@@ -1,6 +1,35 @@
-# ADR-031: Notifications — threshold alerts + scheduled digests
+# ADR-031: Notifications — in-app center, threshold alerts + scheduled digests
 
-**Status:** Proposed **Date:** 2026-06-11 **Deciders:** project owner
+**Status:** Accepted **Date:** 2026-06-11 (accepted 2026-06-19) **Deciders:** project owner
+
+## 2026-06-19 addendum — Accepted, with an in-app Notification Center ("bell") as the primary channel
+
+A design interview (broad audience — homelab + small-biz) settled the open points and **added a
+first-class in-app channel** the original draft only implied. The accepted shape:
+
+- **In-app Notification Center (bell icon)** is the **primary, always-on channel** — a persistent,
+  read/unread, scope-filtered panel in the SPA. It is the home for everything below; outbound
+  channels are opt-in mirrors of it.
+- **Four categories** (each notification carries one): **recommendations** (e.g. "Host X can run a
+  larger model", "reclaim 200 GB of duplicates"), **problems** (scan failed, disk nearly full,
+  agent offline, degraded pool), **activity** (e.g. the scan-coordinator's "deferred because a heavy
+  scan was running", "scan completed"), **security/audit** (config override set, remediation
+  executed, sign-in).
+- **Outbound channels to build:** **Email (SMTP)** + **Chat webhook (Discord/Slack/Telegram)**.
+  Phone/push (Apprise/ntfy/Pushover) is deferred to a later wave. These reuse the `Channel` protocol
+  below; the in-app center is simply the first `Channel` implementation (writes a row, not outbound).
+- **Producers** feeding it: scan-coordinator advisories (ADR-036), scan-health from `AgentRun`,
+  capacity thresholds from `Volume.free`, dedup deltas, audit events, and the suitability
+  **recommendations** from the onboarding wizard + proactive watcher (ADR-037).
+- **Severity/urgency** controls outbound fan-out: everything lands in the bell; only problems above
+  a threshold (and digests) also go to Email/Chat, so the outbound channels are not noisy.
+- Unchanged from the draft: **read-only** (never triggers remediation, never writes the estate);
+  **default-OFF** behind a feature flag; the **pluggable `Channel` protocol** + event/threshold
+  model below stand.
+
+Implemented on branch `claude/notification-center` (Phase 1 = the in-app center + event model +
+store/API + the SPA bell; Email/Chat channels + producer wiring follow). The rest of this document
+is the original design rationale, still in force.
 
 ## Context
 

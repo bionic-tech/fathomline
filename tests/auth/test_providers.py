@@ -2,21 +2,38 @@
 
 from __future__ import annotations
 
+import contextlib
 import socket
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import httpx
+import jwt
 import pytest
+from asgi_lifespan import LifespanManager
+from sqlalchemy import update
 
+from fathom.api.app import create_app
 from fathom.auth import passwords
+from fathom.auth.models import User
+from fathom.auth.passwords import hash_password
+from fathom.auth.principal import Role
 from fathom.auth.providers import oidc
+from fathom.auth.providers.local import SESSION_COOKIE, extract_session_token
 from fathom.auth.providers.oidc import (
     ALLOWED_ALGS,
     OidcError,
     assert_url_allowed,
     build_jwks_client,
     fetch_discovery_document,
+    validate_id_token,
 )
+from fathom.auth.sessions import create_session
+from fathom.core import db
+from fathom.core.settings import Settings
 from tests.api.conftest import seed_principal
 
 # --- local provider / password ----------------------------------------------------------
@@ -78,6 +95,160 @@ async def test_no_credentials_401(api_client: httpx.AsyncClient) -> None:
     assert resp.status_code == 401
 
 
+# --- session lifecycle 401s (EC-auth-3 / EC-auth-5) --------------------------------------
+
+
+async def test_expired_session_me_401(api_client: httpx.AsyncClient) -> None:
+    """A live token whose session row has a past ``expires_at`` is rejected (EC-auth-3)."""
+    async with db.session_scope() as session:
+        user = User(
+            subject="exp-erin",
+            source="local",
+            display_name="exp-erin",
+            password_hash=hash_password("pw"),
+            is_active=True,
+        )
+        session.add(user)
+        await session.flush()
+        row, raw = await create_session(session, user_id=user.id, ttl_seconds=3600)
+        # Backdate absolute expiry: lookup_session must treat this as expired (fail-closed).
+        row.expires_at = datetime.now(tz=UTC) - timedelta(seconds=60)
+    resp = await api_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {raw}"})
+    assert resp.status_code == 401
+
+
+async def test_inactive_user_me_401(api_client: httpx.AsyncClient) -> None:
+    """Deactivating the user invalidates an otherwise-live session immediately (EC-auth-5)."""
+    auth = await seed_principal(username="inactive-ivan", role=Role.VIEWER)
+    ok = await api_client.get("/api/v1/auth/me", headers=auth)
+    assert ok.status_code == 200  # session is live before deactivation
+    async with db.session_scope() as session:
+        await session.execute(
+            update(User).where(User.subject == "inactive-ivan").values(is_active=False)
+        )
+    resp = await api_client.get("/api/v1/auth/me", headers=auth)
+    assert resp.status_code == 401
+
+
+# --- login / MFA input validation (422 before DB access) — EC-auth-12 --------------------
+
+
+async def test_login_empty_username_422(api_client: httpx.AsyncClient) -> None:
+    resp = await api_client.post(
+        "/api/v1/auth/login", json={"username": "", "password": "whatever-pw"}
+    )
+    assert resp.status_code == 422  # username min_length=1
+
+
+async def test_login_oversized_password_422(api_client: httpx.AsyncClient) -> None:
+    resp = await api_client.post(
+        "/api/v1/auth/login", json={"username": "alice", "password": "p" * 2048}
+    )
+    assert resp.status_code == 422  # password max_length=1024 → ~2KB rejected
+
+
+async def test_mfa_verify_malformed_code_422(api_client: httpx.AsyncClient) -> None:
+    # Authenticated so the principal dependency resolves; the body still fails validation → 422.
+    auth = await seed_principal(username="mfa-mona", role=Role.VIEWER)
+    too_short = await api_client.post(
+        "/api/v1/auth/mfa/verify", json={"code": "123"}, headers=auth
+    )
+    assert too_short.status_code == 422  # code min_length=6
+    too_long = await api_client.post(
+        "/api/v1/auth/mfa/verify", json={"code": "123456789"}, headers=auth
+    )
+    assert too_long.status_code == 422  # code max_length=8
+
+
+# --- session cookie flags (EC-auth-21) ---------------------------------------------------
+
+
+@contextlib.asynccontextmanager
+async def _client_with_settings(settings: Settings) -> AsyncIterator[httpx.AsyncClient]:
+    """A throwaway ASGI client over an app built from ``settings`` (mirrors api_client)."""
+    await db.dispose_engine()
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+    await db.dispose_engine()
+
+
+async def test_login_cookie_flags_secure(settings: Settings) -> None:
+    """The login Set-Cookie carries HttpOnly, SameSite=Strict and Secure (secure=True)."""
+    secure = settings.model_copy(update={"session_cookie_secure": True})
+    async with _client_with_settings(secure) as client:
+        await seed_principal(username="cookie-carl", role=Role.VIEWER)
+        resp = await client.post(
+            "/api/v1/auth/login",
+            json={"username": "cookie-carl", "password": "correct horse battery staple"},
+        )
+        assert resp.status_code == 204
+        set_cookie = resp.headers.get("set-cookie", "").lower()
+        assert SESSION_COOKIE in set_cookie
+        assert "httponly" in set_cookie
+        assert "samesite=strict" in set_cookie
+        assert "secure" in set_cookie
+
+
+# --- extract_session_token edge cases (EC-auth-30) ---------------------------------------
+
+
+def _fake_request(
+    *, cookies: dict[str, str] | None = None, headers: dict[str, str] | None = None
+) -> MagicMock:
+    req = MagicMock()
+    req.cookies = cookies or {}
+    req.headers = headers or {}
+    return req
+
+
+def test_extract_token_bare_bearer_is_none() -> None:
+    # "Bearer " with an empty/whitespace token strips to "" → None.
+    assert extract_session_token(_fake_request(headers={"Authorization": "Bearer "})) is None
+
+
+def test_extract_token_empty_cookie_is_none() -> None:
+    # An empty cookie is falsy and must not shadow a (missing) header → None.
+    assert extract_session_token(_fake_request(cookies={SESSION_COOKIE: ""})) is None
+
+
+def test_extract_token_non_bearer_scheme_is_none() -> None:
+    assert extract_session_token(_fake_request(headers={"Authorization": "Basic abc123"})) is None
+
+
+def test_extract_token_positive_cookie_and_bearer() -> None:
+    assert (
+        extract_session_token(_fake_request(cookies={SESSION_COOKIE: "cookie-tok"})) == "cookie-tok"
+    )
+    assert (
+        extract_session_token(_fake_request(headers={"Authorization": "Bearer hdr-tok"}))
+        == "hdr-tok"
+    )
+
+
+# --- OIDC 503 contract while the interactive flow is unwired (EC-auth-15) -----------------
+
+
+async def test_oidc_unset_returns_503_not_configured(api_client: httpx.AsyncClient) -> None:
+    for path in ("/api/v1/auth/oidc/login", "/api/v1/auth/oidc/callback"):
+        resp = await api_client.get(path)
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "OIDC not configured"
+
+
+async def test_oidc_configured_but_unwired_returns_503(settings: Settings) -> None:
+    configured = settings.model_copy(
+        update={"oidc_issuer": "https://idp.example.test", "oidc_client_id": "fathom"}
+    )
+    async with _client_with_settings(configured) as client:
+        for path in ("/api/v1/auth/oidc/login", "/api/v1/auth/oidc/callback"):
+            resp = await client.get(path)
+            assert resp.status_code == 503
+            assert resp.json()["detail"] == "OIDC interactive flow not yet enabled"
+
+
 # --- OIDC SSRF guard + alg allow-list ----------------------------------------------------
 
 
@@ -100,6 +271,48 @@ def test_oidc_alg_allowlist_excludes_none() -> None:
     assert "none" not in ALLOWED_ALGS
     assert "HS256" not in ALLOWED_ALGS
     assert "RS256" in ALLOWED_ALGS
+
+
+# --- id_token alg-confusion: none / HS256-forged must be rejected (EC-auth-17) ------------
+
+
+def _id_token_claims() -> dict[str, Any]:
+    return {
+        "sub": "user-1",
+        "iss": "https://idp.example.test",
+        "aud": "fathom",
+        "exp": datetime.now(tz=UTC) + timedelta(hours=1),
+    }
+
+
+def _fake_jwks_client(key: object) -> SimpleNamespace:
+    """A stand-in PyJWKClient whose signing key is whatever the forger would supply."""
+    return SimpleNamespace(get_signing_key_from_jwt=lambda _token: SimpleNamespace(key=key))
+
+
+def test_id_token_alg_none_rejected() -> None:
+    # An unsigned (alg=none) token: even with a returned key, the allow-list rejects it.
+    token = jwt.encode(_id_token_claims(), key="", algorithm="none")
+    with pytest.raises(OidcError):
+        validate_id_token(
+            token,
+            jwks_client=_fake_jwks_client("any-key"),  # type: ignore[arg-type]
+            issuer="https://idp.example.test",
+            audience="fathom",
+        )
+
+
+def test_id_token_hs256_forged_rejected() -> None:
+    # A token signed HS256 with the (public) key material is rejected: HS* is not in the allow-list.
+    secret = "x" * 40  # >=32 bytes to avoid PyJWT's insecure-key-length warning
+    token = jwt.encode(_id_token_claims(), secret, algorithm="HS256")
+    with pytest.raises(OidcError):
+        validate_id_token(
+            token,
+            jwks_client=_fake_jwks_client(secret),  # type: ignore[arg-type]
+            issuer="https://idp.example.test",
+            audience="fathom",
+        )
 
 
 # --- OIDC TOCTOU / DNS-rebinding: the fetch must pin the once-validated address ----------

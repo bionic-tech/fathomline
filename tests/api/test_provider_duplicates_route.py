@@ -68,3 +68,24 @@ async def test_provider_duplicates_truncation(api_client: httpx.AsyncClient) -> 
     assert resp.status_code == 200
     body = resp.json()
     assert len(body["items"]) == 1 and body["truncated"] is True  # capped + honest truncation flag
+
+
+async def test_provider_segment_routes_to_provider_handler(api_client: httpx.AsyncClient) -> None:
+    # EC-dedup-19: the literal '/duplicates/provider' segment resolves to the provider handler and
+    # returns a ProviderDuplicatesOut — it is NEVER parsed as a {group_id} (which would 422 on the
+    # non-int 'provider'). With no provider-hashed data it is a well-formed empty page, not a 404.
+    auth = await seed_principal()
+    resp = await api_client.get("/api/v1/duplicates/provider", headers=auth)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"items": [], "truncated": False}
+
+
+async def test_provider_limit_over_max_is_422(api_client: httpx.AsyncClient) -> None:
+    # EC-dedup-9: the provider route caps limit at 1000 (le=1000); 1001 is a validation error.
+    # Authenticated as admin so it is the param bound, not auth, that rejects.
+    auth = await seed_principal()
+    resp = await api_client.get("/api/v1/duplicates/provider?limit=1001", headers=auth)
+    assert resp.status_code == 422
+    # The lower bound is enforced too (ge=1).
+    low = await api_client.get("/api/v1/duplicates/provider?limit=0", headers=auth)
+    assert low.status_code == 422

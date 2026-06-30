@@ -83,9 +83,21 @@ def _run_listen(config_path: str) -> int:
     from fathom.agent.actor.listen import ListenStartupError, run_listen
     from fathom.backends.remote import env_or_docker_secret_provider
 
+    # A Scan Now job (ADR-025 + Scan Now) reuses the agent's scan staging DB + operator identity,
+    # resolved from the same env the scan mode uses, so an immediate scan stages exactly where a
+    # scheduled scan does.
+    staging_path = os.environ.get("FATHOM_AGENT_STAGING", _default_staging())
+    operator = os.environ.get("FATHOM_AGENT_OPERATOR", "fathom-agent")
     config = load_agent_config(config_path)
     try:
-        asyncio.run(run_listen(config, secret_provider=env_or_docker_secret_provider))
+        asyncio.run(
+            run_listen(
+                config,
+                secret_provider=env_or_docker_secret_provider,
+                staging_path=staging_path,
+                operator=operator,
+            )
+        )
     except ListenStartupError as exc:
         _log.error("listen mode refused to start", extra={"reason": str(exc)})
         return 2
@@ -155,6 +167,11 @@ def main(argv: list[str] | None = None) -> int:
     # transport / secret fields are never overridable; an invalid or absent override keeps the local
     # config. Done before the scan so the run uses (and then reports) the effective config.
     config = _apply_config_override(config)
+    # ADR-036: ask the core for a scan lease before walking. If the coordinator DEFERS (a heavy
+    # scan is already running), skip this run cleanly — the next scheduled run retries. Fail-open:
+    # any error (no coordinator / core down) proceeds with the scan, so coordination never blocks.
+    if _scan_deferred(config):
+        return 0
     adapter = _build_adapter(config)
     summary = asyncio.run(
         run_agent(
@@ -198,6 +215,33 @@ def _apply_config_override(config: AgentConfig) -> AgentConfig:
         return config
     _log.info("applied operator config override", extra={"fields": sorted(override.keys())})
     return merged
+
+
+def _scan_deferred(config: AgentConfig) -> bool:
+    """Ask the core for a scan lease; return True iff it DEFERRED this run (ADR-036), else False.
+
+    Best-effort + fail-open: any transport/HTTP error (no coordinator, core down, old core without
+    the endpoint) returns False so the scan proceeds — coordination must never block scanning. Only
+    an explicit ``granted: false`` defers, and the advisory (reason + retry-after) is logged.
+    """
+    from fathom.agent.runner import request_scan_lease
+
+    try:
+        decision = asyncio.run(request_scan_lease(config))
+    except Exception as exc:  # transport/HTTP — proceed with the scan (fail-open)
+        _log.warning("scan-lease check failed; scanning anyway", extra={"error": str(exc)})
+        return False
+    if decision.get("granted", True):
+        return False
+    _log.warning(
+        "scan deferred by coordinator; skipping this run",
+        extra={
+            "reason": decision.get("reason"),
+            "retry_after_seconds": decision.get("retry_after_seconds"),
+            "blocking_host": decision.get("blocking_host"),
+        },
+    )
+    return True
 
 
 def _report_run(config: AgentConfig, summary: AgentRunSummary) -> None:

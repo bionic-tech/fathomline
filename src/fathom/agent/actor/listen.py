@@ -24,12 +24,13 @@ import json
 import os
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from fathom.agent.actor.dispatch import ActorDispatcher, JobResult
+from fathom.agent.actor.dispatch import ActorDispatcher, JobResult, ScanDispatcher
 from fathom.agent.actor.executor import Executor
 from fathom.agent.actor.listener import SignedJobListener
 from fathom.agent.config import AgentConfig
@@ -46,6 +47,10 @@ from fathom.core.remediation.job_queue import (
 from fathom.core.remediation.nonce_store import SqliteNonceStore
 from fathom.core.remediation.signing import Ed25519Verifier, HmacVerifier, Verifier
 from fathom.logging import get_logger
+
+if TYPE_CHECKING:
+    from fathom.agent.runner import AgentRunSummary
+    from fathom.core.remediation.job import ScanJob
 
 _log = get_logger("fathom.agent.actor.listen")
 
@@ -140,22 +145,66 @@ def build_verifier(material: str, *, key_id: str, algorithm: str = "ed25519") ->
     raise ListenStartupError(f"unknown orchestrator signing algorithm {algorithm!r}")
 
 
+def build_scan_dispatcher(
+    config: AgentConfig, *, staging_path: str, operator: str
+) -> ScanDispatcher:
+    """Wire the default Scan Now dispatcher (ADR-025 + Scan Now): scope-check + scan-one-root-now.
+
+    The ``scan_runner`` runs the SAME scan -> stage -> push -> finalize pipeline a scheduled run
+    uses, restricted to the job's root (:func:`fathom.agent.runner.scan_one_root_now`). It builds a
+    fresh control-plane adapter per scan (closed by ``run_agent``) so a full-bit Scan Now on a
+    ZFS/TrueNAS host gets a real resync signal (AR-0002), and resolves remote/secret refs the same
+    way a normal run does (ADR-010). Read-only: it carries no write gate, so even a write-disabled
+    deployment could service scan jobs — but in practice scan jobs ride the same listen daemon,
+    which itself requires the write preconditions to start.
+    """
+    from fathom.agent.__main__ import _build_adapter
+    from fathom.agent.runner import scan_one_root_now
+    from fathom.backends.remote import env_or_docker_secret_provider
+
+    async def _run(job: ScanJob) -> AgentRunSummary:
+        return await scan_one_root_now(
+            config,
+            root=job.root,
+            mode=job.mode,
+            staging_path=staging_path,
+            operator=operator,
+            adapter=_build_adapter(config),
+            adapter_pool=config.adapter_pool,
+            secret_provider=env_or_docker_secret_provider,
+        )
+
+    return ScanDispatcher(config=config, scan_runner=_run)
+
+
 def build_listener_from_config(
-    config: AgentConfig, *, secret_provider: SecretProvider
+    config: AgentConfig,
+    *,
+    secret_provider: SecretProvider,
+    staging_path: str | None = None,
+    operator: str = "fathom-agent",
 ) -> SignedJobListener:
     """Assemble the fail-closed :class:`SignedJobListener` from the agent config (ADR-025 §2).
 
+    Two shapes, chosen by ``write_enabled``:
+
+    * **scan-only** (``write_enabled=false``) — verifies + runs read-only Scan Now jobs and
+      **refuses remediation jobs** (no executor, no ``quarantine_dir`` needed). This lets a host run
+      Scan Now without ever arming the destructive path, and is the only shape a native Windows
+      agent uses (its write path is deferred under ADR-027). The replay-nonce ledger lives next to
+      the staging DB.
+    * **full** (``write_enabled=true``) — additionally carries the remediation write path, so it
+      requires ``quarantine_dir`` (the reversible tier + the nonce/act-audit home).
+
+    Either shape requires ``orchestrator_pubkey_ref`` (the trusted key). Building touches no
+    filesystem beyond opening the nonce ledger; a scan only runs if a scan job actually arrives.
+
     Raises:
-        ListenStartupError: if ``write_enabled``, ``orchestrator_pubkey_ref`` or ``quarantine_dir``
-            is missing — the three preconditions for carrying the write path. A scan-only host is
-            refused here, before any network connection is opened.
+        ListenStartupError: ``orchestrator_pubkey_ref`` missing/unresolvable, or
+            ``write_enabled`` is set without a ``quarantine_dir``.
     """
-    if not config.write_enabled:
-        raise ListenStartupError("listen mode requires write_enabled=true (default-off; refusing)")
     if not config.orchestrator_pubkey_ref:
         raise ListenStartupError("listen mode requires orchestrator_pubkey_ref (no trusted key)")
-    if not config.quarantine_dir:
-        raise ListenStartupError("listen mode requires quarantine_dir (no reversible tier)")
     material = secret_provider(config.orchestrator_pubkey_ref)
     if not material:
         raise ListenStartupError("orchestrator_pubkey_ref did not resolve from the secret backend")
@@ -164,6 +213,32 @@ def build_listener_from_config(
         key_id=config.orchestrator_key_id,
         algorithm=config.orchestrator_signing_algorithm,
     )
+    if staging_path is None:
+        # Reuse the agent's standard OS staging path (the same default scan mode uses) so a Scan Now
+        # writes to the same staging DB; resolved lazily to avoid a module-load import cycle.
+        from fathom.agent.__main__ import _default_staging
+
+        staging_path = _default_staging()
+    scan_dispatcher = build_scan_dispatcher(config, staging_path=staging_path, operator=operator)
+
+    if not config.write_enabled:
+        # SCAN-ONLY: no write path. The replay-nonce ledger sits beside the (writable) staging DB
+        # so a replayed scan job is still rejected (T-3) across restarts, without a quarantine dir.
+        nonce_db = str(Path(staging_path).parent / ".scan-nonce-ledger.sqlite")
+        return SignedJobListener(
+            dispatcher=None,
+            verifier=verifier,
+            nonce_store=SqliteNonceStore(nonce_db),
+            host_id=config.host_id,
+            write_enabled=False,
+            scan_dispatcher=scan_dispatcher,
+        )
+
+    # FULL (write path): the remediation executor needs the reversible quarantine tier.
+    if not config.quarantine_dir:
+        raise ListenStartupError(
+            "listen mode with write_enabled=true requires quarantine_dir (no reversible tier)"
+        )
     # Durable local act-audit: the per-item act audit is still returned to core for the durable
     # splice, but it is ALSO appended here so a lost result (core restart in the act→result window)
     # never leaves an act unrecorded on the host that performed it. Defaults INSIDE the quarantine
@@ -185,6 +260,7 @@ def build_listener_from_config(
         nonce_store=SqliteNonceStore(nonce_db),
         host_id=config.host_id,
         write_enabled=True,
+        scan_dispatcher=scan_dispatcher,
     )
 
 
@@ -257,15 +333,21 @@ async def run_listen(
     secret_provider: SecretProvider,
     client: httpx.AsyncClient | None = None,
     stop_event: asyncio.Event | None = None,
+    staging_path: str | None = None,
+    operator: str = "fathom-agent",
 ) -> None:
     """Run the listen loop until ``stop_event`` is set (or forever). Fail-closed at startup.
 
     Builds the fail-closed listener (raising :class:`ListenStartupError` on a missing precondition
     *before* any connection), then long-polls core over the CA-pinned mTLS client, verifying and
-    executing each signed job and posting its result. ``client`` is injectable for tests; in
-    production it is the agent's mTLS client (CA-pinned, presents the client cert).
+    executing each signed job (remediation OR Scan Now) and posting its result. ``client`` is
+    injectable for tests; in production it is the agent's mTLS client (CA-pinned, presents the
+    client cert). ``staging_path``/``operator`` configure where a Scan Now job stages and the
+    operator recorded on its impact ack (defaulted by the listener when unset).
     """
-    listener = build_listener_from_config(config, secret_provider=secret_provider)
+    listener = build_listener_from_config(
+        config, secret_provider=secret_provider, staging_path=staging_path, operator=operator
+    )
     owns_client = client is None
     active = client or mtls_client(config, timeout=_LISTEN_TIMEOUT_SECONDS)
     _log.info(

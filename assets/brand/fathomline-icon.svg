@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Fathomline">
+<defs>
+<linearGradient id="depth" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0"   stop-color="#1C5E72"/>
+      <stop offset="0.42" stop-color="#13375C"/>
+      <stop offset="1"   stop-color="#05101F"/>
+    </linearGradient>
+<linearGradient id="lead" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E7EDF2"/>
+      <stop offset="1" stop-color="#9AA7B3"/>
+    </linearGradient>
+<linearGradient id="line" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9FD9D6"/>
+      <stop offset="1" stop-color="#2BB3A3"/>
+    </linearGradient>
+</defs>
+<rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="url(#depth)"/>
+<clipPath id="clip"><rect x="0" y="0" width="256" height="256" rx="56" ry="56"/></clipPath>
+<g clip-path="url(#clip)" opacity="0.5">
+<rect x="0" y="76.8" width="256" height="2.4" fill="#06121F" opacity="0.55"/>
+<rect x="0" y="79.2" width="256" height="1.6" fill="#3E7E92" opacity="0.18"/>
+<rect x="0" y="117.8" width="256" height="2.4" fill="#06121F" opacity="0.55"/>
+<rect x="0" y="120.2" width="256" height="1.6" fill="#3E7E92" opacity="0.18"/>
+<rect x="0" y="158.7" width="256" height="2.4" fill="#06121F" opacity="0.55"/>
+<rect x="0" y="161.1" width="256" height="1.6" fill="#3E7E92" opacity="0.18"/>
+<rect x="0" y="199.7" width="256" height="2.4" fill="#06121F" opacity="0.55"/>
+<rect x="0" y="202.1" width="256" height="1.6" fill="#3E7E92" opacity="0.18"/>
+</g>
+<line x1="128.0" y1="34.6" x2="128.0" y2="184.3" stroke="url(#line)" stroke-width="10.2" stroke-linecap="round"/>
+<circle cx="128.0" cy="34.6" r="7.7" fill="none" stroke="#9FD9D6" stroke-width="5.6"/>
+<rect x="107.0" y="76.8" width="42.0" height="10.2" rx="5.1" fill="#E2A33A"/>
+<rect x="107.0" y="110.1" width="42.0" height="10.2" rx="5.1" fill="#E2A33A"/>
+<rect x="107.0" y="143.4" width="42.0" height="10.2" rx="5.1" fill="#E2A33A"/>
+<path d="M 101.1 184.3 Q 101.1 177.2 128.0 177.2 Q 154.9 177.2 154.9 184.3 L 141.3 224.0 Q 128.0 236.8 114.7 224.0 Z" fill="url(#lead)"/>
+<line x1="128.0" y1="181.8" x2="128.0" y2="229.1" stroke="#6E7C88" stroke-width="2.0" opacity="0.5" stroke-linecap="round"/>
+</svg>

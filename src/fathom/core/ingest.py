@@ -59,11 +59,12 @@ class _DeferredReconcile:
     volume_id: int = 0
     rows: list[dict[str, object]] = field(default_factory=list)
     prior: dict[tuple[int, int], PriorState] = field(default_factory=dict)
-    removed_inodes: list[int] = field(default_factory=list)
+    # Each key is (dev, inode) for a precise removal, or (None, inode) for a legacy inode-only one.
+    removed_keys: list[tuple[int | None, int]] = field(default_factory=list)
     log_changes: bool = False
 
     async def apply(self) -> ReconcileResult:
-        """Emit churn rows + flip removed inodes to not-present; report counts."""
+        """Emit churn rows + flip removed entries to not-present; report counts."""
         if self.reconciler is None:
             return ReconcileResult()
         return await self.reconciler.reconcile(
@@ -71,7 +72,7 @@ class _DeferredReconcile:
             volume_id=self.volume_id,
             rows=self.rows,
             prior=self.prior,
-            removed_inodes=self.removed_inodes,
+            removed_keys=self.removed_keys,
             log_changes=self.log_changes,
         )
 
@@ -167,12 +168,12 @@ class IngestService:
         """Accept a batch from the authenticated host and upsert its entries."""
         if len(batch.entries) > self._max_batch:
             raise IngestError(f"batch of {len(batch.entries)} exceeds max {self._max_batch}")
-        # Removals are bounded by the same per-batch cap (DoS guard, AR-0012): a forged batch
-        # cannot blow up the reconcile step with an unbounded removed_inodes list.
-        if len(batch.removed_inodes) > self._max_batch:
-            raise IngestError(
-                f"removed_inodes of {len(batch.removed_inodes)} exceeds max {self._max_batch}"
-            )
+        # Removals are bounded by the same per-batch cap (DoS guard, AR-0012): a forged batch cannot
+        # blow up the reconcile step with an unbounded removal list. Apply the cap to whichever
+        # removal list is larger ((dev,inode) ``removed`` or legacy inode-only ``removed_inodes``).
+        removed_count = max(len(batch.removed), len(batch.removed_inodes))
+        if removed_count > self._max_batch:
+            raise IngestError(f"removals of {removed_count} exceeds max {self._max_batch}")
 
         # AR-0012 (ADR-029): the volume mountpoint is agent-supplied — re-vet it server-side and
         # refuse a non-canonical / traversing one. Otherwise a ``..`` mountpoint (e.g.
@@ -206,6 +207,15 @@ class IngestService:
                 },
             )
 
+        # Build the precise removal keys. A modern agent sends ``removed`` ([(dev, inode)] pairs);
+        # a legacy agent sends only ``removed_inodes`` (inode-only), which we carry as (None, inode)
+        # so the reconcile falls back to an inode-only match for exactly those keys (a
+        # backward-compatible wire change). ``removed`` wins when both are present.
+        if batch.removed:
+            removed_keys: list[tuple[int | None, int]] = [(r.dev, r.inode) for r in batch.removed]
+        else:
+            removed_keys = [(None, i) for i in batch.removed_inodes]
+
         # Incremental reconciliation runs on a metadata batch only: a full-bit batch re-hashes
         # existing files (it neither creates nor removes entries), so it carries no removals and
         # must not churn the feed (incremental: removals are an explicit feed signal). Capture the
@@ -215,7 +225,7 @@ class IngestService:
             host_id=host.id,
             volume=volume,
             rows=accepted.rows,
-            removed_inodes=batch.removed_inodes,
+            removed_keys=removed_keys,
             fullbit=fullbit,
         )
 
@@ -241,7 +251,7 @@ class IngestService:
         host_id: int,
         volume: Volume,
         rows: list[dict[str, object]],
-        removed_inodes: list[int],
+        removed_keys: list[tuple[int | None, int]],
         fullbit: bool,
     ) -> _DeferredReconcile:
         """Capture pre-upsert state now; defer the churn/removal apply until after the upsert.
@@ -264,7 +274,7 @@ class IngestService:
             volume_id=volume.id,
             rows=rows,
             prior=prior,
-            removed_inodes=removed_inodes,
+            removed_keys=removed_keys,
             log_changes=log_changes,
         )
 
@@ -279,6 +289,10 @@ class IngestService:
             self._session.add(existing)
         existing.os = batch.host.os
         existing.agent_version = batch.host.agent_version
+        # Persist hardware facts only when the agent reported them (ADR-037) — never overwrite
+        # previously known facts with null from a pre-facts agent.
+        if batch.host.facts is not None:
+            existing.facts = batch.host.facts.model_dump()
         existing.last_seen = datetime.now(tz=UTC)
         await self._session.flush()
         return existing

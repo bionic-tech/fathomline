@@ -128,14 +128,131 @@ export interface OrganizePlanOut {
 export interface ServerConfigOut {
   organize_enabled: boolean;
   inference_provider: string;
+  inference_model: string;
   inference_ollama_url: string;
-  organize_model: string;
+  organize_model: string | null;
   inference_allow_egress: boolean;
   inference_timeout_seconds: number;
   remediation_enabled: boolean;
   remediation_blast_cap: number;
   preview_enabled: boolean;
   change_log_retention_days: number;
+  concierge_enabled: boolean;
+  concierge_model: string | null;
+  concierge_embeddings_enabled: boolean;
+  scan_coordinator_enabled: boolean;
+  notifications_enabled: boolean;
+  onboarding_completed: boolean;
+}
+
+// --- Notification Center (ADR-031) + outbound channels (ADR-039) ---------------------------
+
+export interface NotificationOut {
+  id: number;
+  category: string; // recommendation | problem | activity | security
+  severity: string; // info | warning | critical
+  title: string;
+  body: string;
+  source: string;
+  host_id?: number | null;
+  volume_id?: number | null;
+  created_at: string;
+  read: boolean;
+}
+
+export interface NotificationListOut {
+  items: NotificationOut[];
+  unread_count: number;
+}
+
+export interface UnreadCountOut {
+  unread_count: number;
+}
+
+export interface NotifyChannelResult {
+  channel: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface NotifyTestResult {
+  results: NotifyChannelResult[];
+}
+
+// --- Suitability / onboarding (ADR-037) ---------------------------------------------------
+
+export interface HostFactsOut {
+  cpu_cores?: number | null;
+  cpu_model?: string | null;
+  ram_bytes?: number | null;
+  gpu_name?: string | null;
+  gpu_vram_bytes?: number | null;
+  arch?: string | null;
+}
+
+export type SuitabilityRating = "green" | "amber" | "red";
+
+export interface OptionAssessmentOut {
+  key: string;
+  label: string;
+  rating: SuitabilityRating;
+  reason: string;
+}
+
+export interface HostSuitabilityOut {
+  host_id: number;
+  name: string;
+  facts_known: boolean;
+  facts?: HostFactsOut | null;
+  options: OptionAssessmentOut[];
+  recommendation: string;
+  recommended_chat_provider: string;
+  recommended_chat_model: string | null;
+  recommended_embedder: string;
+  recommended_embedding_dim: number | null;
+}
+
+export interface SuitabilityListOut {
+  hosts: HostSuitabilityOut[];
+  egress_allowed: boolean;
+}
+
+// AI concierge (ADR-035): a natural-language question over the catalogue + its grounded answer.
+export interface ConciergeTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ConciergeAskRequest {
+  question: string;
+  volume_id?: number | null;
+  host_id?: number | null;
+  /** The page/view the user asked from — a soft context hint (ADR-035). */
+  page?: string | null;
+  /** Recent conversation turns (client-held memory) so follow-ups resolve. */
+  history?: ConciergeTurn[];
+}
+
+export interface ConciergeCitationOut {
+  label: string;
+  path?: string | null;
+  entry_id?: number | null;
+  host_id?: number | null;
+  volume_id?: number | null;
+}
+
+export interface ConciergeActionOut {
+  label: string;
+  route: string;
+  volume_id?: number | null;
+}
+
+export interface ConciergeAnswerOut {
+  answer: string;
+  tool: string;
+  considered: number;
+  citations: ConciergeCitationOut[];
+  actions?: ConciergeActionOut[];
 }
 
 // --- cross-host reconciliation (ADR-024; read-only divergence detection) ------------------
@@ -182,7 +299,7 @@ export interface OrganizeActivityOut {
 
 export interface ChangeOut {
   path: string;
-  change_type: string; // created | modified | removed
+  change_type: string; // create | modify | delete (backend incremental.CHANGE_TYPES)
   size_delta: number; // signed: negative on shrink/removal
   ts: string;
 }
@@ -232,6 +349,11 @@ export interface MeResponse {
   groups: string[];
   grants: Grant[];
   mfa_fresh: boolean;
+  mfa_enrolled?: boolean; // a confirmed TOTP enrollment exists
+}
+
+export interface EnrollResponse {
+  provisioning_uri: string; // otpauth:// URI (carries the TOTP secret)
 }
 
 export type SizeBasis = "on_disk" | "logical";
@@ -398,6 +520,15 @@ export interface AgentConfigOverride {
   throttle?: Record<string, unknown>;
 }
 
+// --- on-demand scan dispatch (POST /api/v1/agents/{host_id}/scan; signed-job channel) ----------
+// The two scan depths: a fast metadata pass, or a heavy full-bit (content-fingerprint) pass.
+export type ScanMode = "metadata" | "fullbit";
+
+// 202 response when the dispatch channel is armed; the endpoint 503s until it's enabled on the core.
+export interface ScanDispatchOut {
+  job_id: string;
+}
+
 // --- live directory browse (ADR-034 Phase 2): pick scan roots/excludes by listing real dirs ----
 
 export interface BrowseEntry {
@@ -562,8 +693,13 @@ export interface DeployRunOut {
 
 export interface EnrollRequest {
   host_id: string;
+  platform?: "linux" | "windows";
   mounts?: ScopeMountIn[];
   remote_targets?: RemoteTargetIn[];
+  // Native Windows agent (ADR-027): real Windows paths to scan, and the subset to content-hash
+  // (full-bit W2 — local-only, never hydrates cloud placeholders). Metadata-only when omitted.
+  windows_scan_paths?: string[];
+  windows_fullbit_paths?: string[];
   proxy_host_ip?: string;
   core_base_url?: string;
 }
@@ -573,4 +709,48 @@ export interface EnrollOut {
   token: string;
   command: string;
   expires_at: string;
+}
+
+// --- runtime settings store (ADR-038) ----------------------------------------------------
+
+export interface SettingOut {
+  key: string;
+  category: string;
+  type: string; // bool | int | float | str | list
+  editable: boolean;
+  is_secret: boolean;
+  restart_required: boolean;
+  help: string;
+  overridden: boolean;
+  is_set: boolean;
+  value: unknown; // null for a secret; the effective value otherwise
+  label: string; // human label; the key is shown secondary
+  options: string[] | null; // closed value set → strict dropdown
+  suggestions?: string[] | null; // open value set → free-text combobox (datalist hints)
+  relevant: boolean; // currently applies given other settings' values
+  relevant_hint: string | null; // why it's inapplicable (shown when relevant is false)
+  advanced?: boolean; // tuck behind an "Advanced" disclosure in the UI
+}
+
+export interface SettingsListOut {
+  settings: SettingOut[];
+  named_secrets: string[];
+  version: number;
+}
+
+export interface SetSecretRequest {
+  ref: string;
+  value: string;
+}
+
+export interface RevealSecretOut {
+  key: string;
+  value: string;
+}
+
+export interface SettingMutationResult {
+  key: string;
+  overridden: boolean;
+  restart_required: boolean;
+  version: number;
 }

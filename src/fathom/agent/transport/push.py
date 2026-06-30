@@ -20,9 +20,17 @@ from dataclasses import dataclass
 
 import httpx
 
+from fathom.agent import host_facts
 from fathom.agent.config import AgentConfig
 from fathom.agent.staging.store import StagingStore
-from fathom.api.schemas import EntryFrame, HostFrame, IngestBatch, IngestResult, VolumeFrame
+from fathom.api.schemas import (
+    EntryFrame,
+    HostFactsFrame,
+    HostFrame,
+    IngestBatch,
+    IngestResult,
+    VolumeFrame,
+)
 from fathom.logging import get_logger
 
 _log = get_logger("fathom.agent.transport")
@@ -136,8 +144,12 @@ class PushClient:
         and the removal (present=false flip) are idempotent on the server.
         """
         total = 0
+        # Probe this host's hardware once for the whole drain (ADR-037) — it does not change between
+        # runs. Best-effort + off the event loop (nvidia-smi may block); a failure leaves facts None
+        # so the drain proceeds exactly as before.
+        facts = await self._probe_facts()
         for run in staging.pending_runs():
-            host = HostFrame(name=run["host_id"])
+            host = HostFrame(name=run["host_id"], facts=facts)
             volume = self._volume_frame(run)
             snapshot_id: int | None = None
             while True:
@@ -163,6 +175,17 @@ class PushClient:
             await self._drain_removals(staging, run, snapshot_id)
         return total
 
+    async def _probe_facts(self) -> HostFactsFrame | None:
+        """Probe host hardware off the event loop; return None on any failure (fail-soft)."""
+        try:
+            raw = await asyncio.to_thread(host_facts.collect)
+            return HostFactsFrame(**raw)
+        except Exception as exc:  # a facts probe must never break a drain
+            _log.warning(
+                "host-facts probe failed; reporting without facts", extra={"error": str(exc)}
+            )
+            return None
+
     async def _drain_removals(
         self, staging: StagingStore, run: sqlite3.Row, snapshot_id: int | None
     ) -> None:
@@ -181,6 +204,10 @@ class PushClient:
                 mode="metadata",
                 snapshot_id=snapshot_id,
                 entries=[],
+                # Precise (dev, inode) removals (matches the catalogue identity so a cross-dataset
+                # inode collision flips only the right device's row). ``removed_inodes`` is sent too
+                # so an older server that predates the ``removed`` field still applies the removal.
+                removed=[{"dev": r["dev"], "inode": r["inode"]} for r in rows],
                 removed_inodes=[r["inode"] for r in rows],
             )
             await self.push(batch)
@@ -195,6 +222,7 @@ class PushClient:
             data = json.loads(raw)
             return VolumeFrame(
                 mountpoint=data["mountpoint"],
+                display_name=data.get("display_name"),
                 fs_type=data.get("fs_type", "unknown"),
                 device=data.get("device", "unknown"),
                 transport=data.get("transport", "unknown"),

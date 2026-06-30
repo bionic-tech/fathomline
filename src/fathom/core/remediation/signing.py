@@ -32,7 +32,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from fathom.core.remediation.job import ActionJob, SignedJob
+from fathom.core.remediation.job import ActionJob, ScanJob, SignedJob
 
 
 class JobVerificationError(Exception):
@@ -60,7 +60,7 @@ class Signer(Protocol):
     @property
     def key_id(self) -> str: ...
 
-    def sign(self, job: ActionJob) -> SignedJob: ...
+    def sign(self, job: ActionJob | ScanJob) -> SignedJob: ...
 
 
 class Verifier(Protocol):
@@ -83,7 +83,7 @@ class Ed25519Signer:
     def key_id(self) -> str:
         return self._key_id
 
-    def sign(self, job: ActionJob) -> SignedJob:
+    def sign(self, job: ActionJob | ScanJob) -> SignedJob:
         signature = self._private_key.sign(job.canonical_bytes())
         return SignedJob(
             job=job,
@@ -129,7 +129,7 @@ class HmacSigner:
     def key_id(self) -> str:
         return self._key_id
 
-    def sign(self, job: ActionJob) -> SignedJob:
+    def sign(self, job: ActionJob | ScanJob) -> SignedJob:
         mac = hmac.new(self._secret, job.canonical_bytes(), hashlib.sha256).digest()
         return SignedJob(
             job=job,
@@ -159,7 +159,7 @@ class HmacVerifier:
         return hmac.compare_digest(expected, provided)
 
 
-def sign_job(job: ActionJob, signer: Signer) -> SignedJob:
+def sign_job(job: ActionJob | ScanJob, signer: Signer) -> SignedJob:
     """Sign ``job`` with ``signer`` (Ed25519 by default). The returned :class:`SignedJob` is
     what crosses the wire; the bare :class:`ActionJob` never is."""
     return signer.sign(job)
@@ -172,7 +172,7 @@ async def verify_job(
     nonce_store: NonceStore,
     expected_host_id: str,
     now: datetime | None = None,
-) -> ActionJob:
+) -> ActionJob | ScanJob:
     """Verify a signed job on **every** axis before returning it; raise otherwise (fail-closed).
 
     Order matters: signature → time window → scope are checked *before* the nonce is consumed,
@@ -205,7 +205,7 @@ async def verify_job(
         raise JobVerificationError(
             f"job host scope {job.host_id!r} does not match this agent {expected_host_id!r}"
         )
-    if not await nonce_store.consume(job.nonce, job_id=job.plan_id):
+    if not await nonce_store.consume(job.nonce, job_id=job.ledger_ref):
         raise NonceReuseError(f"nonce already consumed (replay): {job.nonce}")
     return job
 

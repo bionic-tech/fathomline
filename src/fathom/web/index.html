@@ -8,6 +8,20 @@
       container's SecurityHeadersMiddleware (no unsafe-inline / no unsafe-eval, frontend ADD
       §12). No inline <script>/<style> appears in this document, so the strict header holds.
     -->
+    <!-- Fathomline favicon (brand source: assets/brand/; copied into public/ — see public/README.md). -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/svg+xml" href="/fathomline-icon.svg" />
+    <!--
+      Brand fonts (Sora / Inter / JetBrains Mono) via Google Fonts. NOTE: the strict CSP must allow
+      fonts.googleapis.com (style-src) + fonts.gstatic.com (font-src) for these to load; otherwise
+      the SPA falls back to the system font stacks in src/index.css.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+    />
     <title>Fathomline — Storage Estate Analyzer</title>
   </head>
   <body>

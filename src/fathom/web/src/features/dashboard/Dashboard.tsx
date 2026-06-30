@@ -20,6 +20,7 @@ import type { VolumeOut } from "../../api/types";
 import { formatBytes, formatBytesExact } from "../../lib/format";
 import { useUiStore } from "../../state/uiStore";
 import { Breadcrumbs } from "../common/Breadcrumbs";
+import { Tabs, type TabDef } from "../common/Tabs";
 
 // Estate inventory modal — which hosts exist and which volumes live on each, so you can see at a
 // glance "nas-1 has tank + nextcloud-data" etc. (answers "where does this data live?").
@@ -130,6 +131,120 @@ export function Dashboard(): JSX.Element {
     if (selectedVolume) selectVolume(selectedVolume.host_id, selectedVolume.id, selectedVolume.mountpoint);
   };
 
+  // The three heavy chart panels become tabs (stop the long scroll, report part 3); the KPI
+  // summary stays pinned above so the estate glance is always visible.
+  const tabs: TabDef[] = [
+    {
+      id: "capacity",
+      label: "Volume capacity",
+      content: (
+        <section aria-label="Volume capacity" className="fathom-card">
+          {volumes.isError ? (
+            <p role="alert" className="fathom-inline-error">
+              Couldn't load volumes.{" "}
+              <button type="button" className="fathom-btn" onClick={() => void volumes.refetch()}>
+                Retry
+              </button>
+            </p>
+          ) : volumes.data ? (
+            <VolumeUsageChart volumes={volumes.data} variant="bar" hostName={hostName} />
+          ) : (
+            <p role="status">Loading volumes…</p>
+          )}
+        </section>
+      ),
+    },
+    {
+      id: "composition",
+      label: "Composition",
+      content: (
+        <section aria-label="Estate composition" className="fathom-card">
+          <div className="fathom-card-head">
+            <span className="fathom-card-title">Composition</span>
+            <div className="fathom-view-toggle" role="group" aria-label="Composition view">
+              <button
+                type="button"
+                className={`fathom-btn ${view === "treemap" ? "fathom-btn-active" : ""}`}
+                aria-pressed={view === "treemap"}
+                onClick={() => setView("treemap")}
+              >
+                Treemap
+              </button>
+              <button
+                type="button"
+                className={`fathom-btn ${view === "sunburst" ? "fathom-btn-active" : ""}`}
+                aria-pressed={view === "sunburst"}
+                onClick={() => setView("sunburst")}
+              >
+                Sunburst
+              </button>
+            </div>
+          </div>
+          {selectedVolume && selectedPath ? (
+            <Breadcrumbs
+              mount={selectedVolume.mountpoint}
+              path={selectedPath}
+              onNavigate={(p) =>
+                p === selectedVolume.mountpoint ? resetToVolumeRoot() : selectPath(p)
+              }
+            />
+          ) : null}
+          {treemap.isError ? (
+            // Branch on the error BEFORE the empty state: a failed/timed-out query must not be
+            // mistaken for "no data — run a scan" (EC-charts-18/19). Offer a retry instead.
+            <p role="alert" className="fathom-inline-error">
+              Couldn't load composition data.{" "}
+              <button type="button" className="fathom-btn" onClick={() => void treemap.refetch()}>
+                Retry
+              </button>
+            </p>
+          ) : treemap.data && treemap.data.length > 0 ? (
+            view === "treemap" ? (
+              <Treemap nodes={treemap.data} onDrill={drill} />
+            ) : (
+              <Sunburst nodes={treemap.data} onDrill={drill} />
+            )
+          ) : (
+            <p role="status">
+              {selectedVolumeId === null
+                ? "Select a volume to view its composition."
+                : "No composition data — run a scan + finalize for this subtree."}
+            </p>
+          )}
+          <p className="fathom-muted fathom-hint">
+            Tip: click a block to drill in; use the breadcrumb to go back up.
+          </p>
+        </section>
+      ),
+    },
+    {
+      id: "growth",
+      label: "Growth trend",
+      content: (
+        <section aria-label="Growth trend" className="fathom-card">
+          {history.isError ? (
+            <p role="alert" className="fathom-inline-error">
+              Couldn't load the growth series.{" "}
+              <button type="button" className="fathom-btn" onClick={() => void history.refetch()}>
+                Retry
+              </button>
+            </p>
+          ) : history.data && history.data.points.length > 0 ? (
+            <GrowthSeries series={history.data} />
+          ) : (
+            // Branch on selection like the composition panel (EC-charts-19): once a volume IS
+            // selected, an empty series means "not enough history yet", not "pick a volume".
+            <p role="status">
+              {selectedVolumeId === null
+                ? "Select a volume to view growth over time."
+                : "Not enough history yet — growth appears after a few scans of this volume."}
+            </p>
+          )}
+        </section>
+      ),
+    },
+  ];
+
   return (
     <section aria-labelledby="dash-title" className="fathom-dashboard">
       <h1 id="dash-title">Estate dashboard</h1>
@@ -175,70 +290,7 @@ export function Dashboard(): JSX.Element {
         />
       ) : null}
 
-      <section aria-label="Volume capacity" className="fathom-card">
-        <h2 className="fathom-card-title">Volume capacity</h2>
-        {volumes.data ? (
-          <VolumeUsageChart volumes={volumes.data} variant="bar" />
-        ) : (
-          <p role="status">Loading volumes…</p>
-        )}
-      </section>
-
-      <section aria-label="Estate composition" className="fathom-card">
-        <div className="fathom-card-head">
-          <h2 className="fathom-card-title">Composition</h2>
-          <div className="fathom-view-toggle" role="group" aria-label="Composition view">
-            <button
-              type="button"
-              className={`fathom-btn ${view === "treemap" ? "fathom-btn-active" : ""}`}
-              aria-pressed={view === "treemap"}
-              onClick={() => setView("treemap")}
-            >
-              Treemap
-            </button>
-            <button
-              type="button"
-              className={`fathom-btn ${view === "sunburst" ? "fathom-btn-active" : ""}`}
-              aria-pressed={view === "sunburst"}
-              onClick={() => setView("sunburst")}
-            >
-              Sunburst
-            </button>
-          </div>
-        </div>
-        {selectedVolume && selectedPath ? (
-          <Breadcrumbs
-            mount={selectedVolume.mountpoint}
-            path={selectedPath}
-            onNavigate={(p) =>
-              p === selectedVolume.mountpoint ? resetToVolumeRoot() : selectPath(p)
-            }
-          />
-        ) : null}
-        {treemap.data && treemap.data.length > 0 ? (
-          view === "treemap" ? (
-            <Treemap nodes={treemap.data} onDrill={drill} />
-          ) : (
-            <Sunburst nodes={treemap.data} onDrill={drill} />
-          )
-        ) : (
-          <p role="status">
-            {selectedVolumeId === null
-              ? "Select a volume to view its composition."
-              : "No composition data — run a scan + finalize for this subtree."}
-          </p>
-        )}
-        <p className="fathom-muted fathom-hint">Tip: click a block to drill in; use the breadcrumb to go back up.</p>
-      </section>
-
-      <section aria-label="Growth trend" className="fathom-card">
-        <h2 className="fathom-card-title">Growth trend</h2>
-        {history.data && history.data.points.length > 0 ? (
-          <GrowthSeries series={history.data} />
-        ) : (
-          <p role="status">Select a volume to view growth over time.</p>
-        )}
-      </section>
+      <Tabs tabs={tabs} ariaLabel="Dashboard sections" />
     </section>
   );
 }

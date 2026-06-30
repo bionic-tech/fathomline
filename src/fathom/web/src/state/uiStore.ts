@@ -16,11 +16,17 @@ export interface UiState {
   selectedPath: string | null;
   /** Multi-select set for dedup/remediation selection (path keys). */
   selection: Set<string>;
+  /** Concierge floating sidebar: open = visible now; pinned = docked + reopens on next login.
+   *  Runtime state lives here; the pin flag is persisted to localStorage by the widget. */
+  conciergeOpen: boolean;
+  conciergePinned: boolean;
   setView: (view: ViewMode) => void;
   selectVolume: (hostId: number | null, volumeId: number | null, mountpoint: string | null) => void;
   selectPath: (path: string | null) => void;
   toggleSelected: (path: string) => void;
   clearSelection: () => void;
+  setConciergeOpen: (open: boolean) => void;
+  setConciergePinned: (pinned: boolean) => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -29,6 +35,8 @@ export const useUiStore = create<UiState>((set) => ({
   selectedVolumeId: null,
   selectedPath: null,
   selection: new Set<string>(),
+  conciergeOpen: false,
+  conciergePinned: false,
   setView: (view) => set({ view }),
   selectVolume: (selectedHostId, selectedVolumeId, mountpoint) =>
     set({ selectedHostId, selectedVolumeId, selectedPath: mountpoint, selection: new Set() }),
@@ -41,4 +49,6 @@ export const useUiStore = create<UiState>((set) => ({
       return { selection: next };
     }),
   clearSelection: () => set({ selection: new Set() }),
+  setConciergeOpen: (conciergeOpen) => set({ conciergeOpen }),
+  setConciergePinned: (conciergePinned) => set({ conciergePinned }),
 }));

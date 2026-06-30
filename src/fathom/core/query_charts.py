@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fathom.core.catalogue.models import FsEntryRow, SizeHistory, SubtreeRollup, Volume
@@ -190,6 +190,15 @@ async def top_n_subtrees(
     child_depth = _depth_within(mount, path) + 1
     like = escape_like(path.rstrip("/")) + "/%"
 
+    # Order on the *effective* size — the rollup total when present, else the entry's own size
+    # (the same fallback applied when building the row) — so ``ORDER BY ... LIMIT n`` can be
+    # pushed into SQL and the database never hands back the full child rowset for a directory
+    # with millions of children (spec risk: unbounded top-N fetch then slice in Python).
+    if by == "on_disk":
+        size_col = func.coalesce(SubtreeRollup.total_size_on_disk, FsEntryRow.size_on_disk)
+    else:
+        size_col = func.coalesce(SubtreeRollup.total_size_logical, FsEntryRow.size_logical)
+
     stmt = (
         select(FsEntryRow, SubtreeRollup)
         .outerjoin(
@@ -210,6 +219,10 @@ async def top_n_subtrees(
         stmt = stmt.where(FsEntryRow.is_dir.is_(True))
     elif kind == "file":
         stmt = stmt.where(FsEntryRow.is_dir.is_(False))
+    # Biggest first; ``path`` ASC is a deterministic secondary key so equal-size rows order
+    # stably across calls (otherwise the tie order is whatever the engine returns). ``LIMIT n``
+    # caps the rowset in the database, not in Python.
+    stmt = stmt.order_by(size_col.desc(), FsEntryRow.path.asc()).limit(n)
 
     items: list[TopNItem] = []
     for entry, rollup in (await session.execute(stmt)).all():
@@ -231,9 +244,7 @@ async def top_n_subtrees(
                 file_count=file_count,
             )
         )
-    key = (lambda i: i.size_on_disk) if by == "on_disk" else (lambda i: i.size_logical)
-    items.sort(key=key, reverse=True)
-    return items[:n]
+    return items
 
 
 def _downsample(points: list[GrowthPoint], buckets: int) -> list[GrowthPoint]:

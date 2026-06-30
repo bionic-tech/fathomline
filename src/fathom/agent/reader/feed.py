@@ -42,14 +42,18 @@ ChangeKind = Literal["create", "modify", "delete"]
 class ChangeEvent:
     """One change the feed observed since the last cycle.
 
-    CREATE/MODIFY carry the re-``stat``'d :class:`FsEntry`; DELETE carries only ``inode`` (the
-    server marks that ``(host, volume, inode)`` row not-present). ``path`` is always set for logs.
+    CREATE/MODIFY carry the re-``stat``'d :class:`FsEntry`; DELETE carries the ``(dev, inode)`` of
+    the removed entry (the server marks that ``(host, volume, dev, inode)`` row not-present).
+    ``dev`` (st_dev) is part of the identity so colliding inodes on different ZFS child datasets of
+    a ``cross_mounts`` volume don't alias; it defaults to 0 (single-fs / remote). ``path`` is
+    always set for logs and for the staged removal's recorded path.
     """
 
     kind: ChangeKind
     path: str
     inode: int
     entry: FsEntry | None = None
+    dev: int = 0
 
     def __post_init__(self) -> None:
         if self.kind in ("create", "modify") and self.entry is None:
@@ -58,19 +62,25 @@ class ChangeEvent:
 
 @dataclass(slots=True)
 class ChangeDelta:
-    """The reconciled delta of one feed cycle: entries to upsert + (inode, path) removals.
+    """The reconciled delta of one feed cycle: entries to upsert + (dev, inode, path) removals.
 
-    ``removals`` carries the path the feed last knew for each removed inode so the staged removal
-    (and the server's DELETE churn row) records a real path, not just an inode.
+    ``removals`` carries, per removed entry, its ``(dev, inode)`` key plus the path the feed last
+    knew for it, so the staged removal (and the server's DELETE churn row) records a real path and
+    flips only the right device's row on a ``cross_mounts`` volume.
     """
 
     upserts: list[FsEntry] = field(default_factory=list)
-    removals: list[tuple[int, str]] = field(default_factory=list)
+    removals: list[tuple[int, int, str]] = field(default_factory=list)  # (dev, inode, path)
+
+    @property
+    def removed(self) -> list[tuple[int, int]]:
+        """The removed ``(dev, inode)`` keys — the precise wire/ingest signal."""
+        return [(dev, inode) for dev, inode, _path in self.removals]
 
     @property
     def removed_inodes(self) -> list[int]:
-        """The removed inodes only (the wire/ingest signal)."""
-        return [inode for inode, _path in self.removals]
+        """The removed inodes only — kept for any legacy (inode-only) caller."""
+        return [inode for _dev, inode, _path in self.removals]
 
     @property
     def is_empty(self) -> bool:
@@ -93,75 +103,85 @@ class ChangeFeed(Protocol):
 
 
 async def collect_delta(feed: ChangeFeed, root: str) -> ChangeDelta:
-    """Drain ``feed`` for ``root`` into a :class:`ChangeDelta` of upserts + removed inodes.
+    """Drain ``feed`` for ``root`` into a :class:`ChangeDelta` of upserts + (dev, inode) removals.
 
-    De-duplicates within a cycle so the pushed delta is minimal and consistent:
+    De-duplicates within a cycle, keyed on ``(dev, inode)`` (so colliding inodes on different ZFS
+    child datasets never collapse), so the pushed delta is minimal and consistent:
 
-    * a CREATE-then-DELETE of the same inode in one cycle **cancels** — the file came and went
-      within the cycle, so there is nothing to upsert and nothing in the catalogue to remove;
-    * a DELETE-then-CREATE of the same inode (a rename the feed split into delete+create on the
-      same inode) collapses to a single upsert — the later create cancels the earlier delete.
+    * a CREATE-then-DELETE of the same ``(dev, inode)`` in one cycle **cancels** — the file came and
+      went within the cycle, so there is nothing to upsert and nothing in the catalogue to remove;
+    * a DELETE-then-CREATE of the same ``(dev, inode)`` (a rename the feed split into delete+create)
+      collapses to a single upsert — the later create cancels the earlier delete.
 
-    Only inodes the catalogue could actually hold (a delete that was *not* freshly created this
-    cycle) end up in ``removed_inodes``.
+    Only ``(dev, inode)`` keys the catalogue could actually hold (a delete that was *not* freshly
+    created this cycle) end up in ``removals``.
     """
-    upserts: dict[int, FsEntry] = {}
-    removed: dict[int, str] = {}
-    created_this_cycle: set[int] = set()
+    upserts: dict[tuple[int, int], FsEntry] = {}
+    removed: dict[tuple[int, int], str] = {}
+    created_this_cycle: set[tuple[int, int]] = set()
     async for ev in feed.changes(root):
+        key = (ev.dev, ev.inode)
         if ev.kind == "delete":
-            had_pending = upserts.pop(ev.inode, None) is not None
-            if had_pending and ev.inode in created_this_cycle:
+            had_pending = upserts.pop(key, None) is not None
+            if had_pending and key in created_this_cycle:
                 # Created then deleted within this cycle → net nothing (never persisted).
-                created_this_cycle.discard(ev.inode)
+                created_this_cycle.discard(key)
                 continue
-            removed[ev.inode] = ev.path
+            removed[key] = ev.path
         else:
             assert ev.entry is not None  # noqa: S101 — guaranteed by ChangeEvent.__post_init__
-            upserts[ev.inode] = ev.entry
-            removed.pop(ev.inode, None)  # a re-create cancels an earlier delete of this inode
+            upserts[key] = ev.entry
+            removed.pop(key, None)  # a re-create cancels an earlier delete of this (dev, inode)
             if ev.kind == "create":
-                created_this_cycle.add(ev.inode)
-    removals = sorted(removed.items())
+                created_this_cycle.add(key)
+    removals = [(dev, inode, path) for (dev, inode), path in sorted(removed.items())]
     return ChangeDelta(upserts=list(upserts.values()), removals=removals)
 
 
 class RestatFeed:
     """Portable fallback feed: re-``stat`` by ``mtime`` + inode-set diff for removals (ADR-006).
 
-    Given the prior cycle's ``{inode: (mtime, path)}`` baseline, a fresh metadata walk yields the
-    current set; this feed emits CREATE for new inodes, MODIFY for inodes whose ``mtime``/path
-    changed, and DELETE for baseline inodes absent from the fresh walk. It re-walks the tree (no
-    kernel change-journal), so it is the bounded-window fallback ADD 02 names — cheaper than a full
+    Given the prior cycle's ``{(dev, inode): (mtime, path)}`` baseline, a fresh metadata walk yields
+    the current set; this feed emits CREATE for new ``(dev, inode)`` keys, MODIFY for keys whose
+    ``mtime``/path changed, and DELETE for baseline keys absent from the fresh walk. Keying on
+    ``(dev, inode)`` — not inode alone — keeps colliding inodes on different ZFS child datasets of a
+    ``cross_mounts`` volume from collapsing into one baseline slot. It re-walks the tree (no kernel
+    change-journal), so it is the bounded-window fallback ADD 02 names — cheaper than a full
     re-ingest because only changed entries are staged/pushed, never the unchanged majority.
     """
 
     def __init__(
         self,
         backend: StorageBackend,
-        baseline: dict[int, tuple[float, str]],
+        baseline: dict[tuple[int, int], tuple[float, str]],
         *,
         exclude: Collection[str] = (),
     ) -> None:
         self._backend = backend
+        # Keyed on (dev, inode) so a cross-dataset inode collision is tracked as two baseline slots.
         self._baseline = baseline
         # ADR-034: prune excluded subtrees on the re-walk so a cycle never re-adds them.
         self._exclude: tuple[str, ...] = tuple(exclude)
 
     async def changes(self, root: str) -> AsyncIterator[ChangeEvent]:
-        seen: set[int] = set()
+        seen: set[tuple[int, int]] = set()
         async for entry in self._backend.walk(root, one_filesystem=True, exclude=self._exclude):
-            seen.add(entry.inode)
-            prior = self._baseline.get(entry.inode)
+            key = (entry.dev, entry.inode)
+            seen.add(key)
+            prior = self._baseline.get(key)
             if prior is None:
-                yield ChangeEvent(kind="create", path=entry.path, inode=entry.inode, entry=entry)
+                yield ChangeEvent(
+                    kind="create", path=entry.path, inode=entry.inode, entry=entry, dev=entry.dev
+                )
             elif prior[0] != entry.mtime or prior[1] != entry.path:
                 # mtime changed (content/metadata touch) OR path changed (a detected rename →
-                # cheap path update, same inode): both are a MODIFY upsert (incremental ruling).
-                yield ChangeEvent(kind="modify", path=entry.path, inode=entry.inode, entry=entry)
-        for inode, (_mtime, path) in self._baseline.items():
-            if inode not in seen:
-                yield ChangeEvent(kind="delete", path=path, inode=inode)
+                # cheap path update, same (dev, inode)): both are a MODIFY upsert (incremental).
+                yield ChangeEvent(
+                    kind="modify", path=entry.path, inode=entry.inode, entry=entry, dev=entry.dev
+                )
+        for (dev, inode), (_mtime, path) in self._baseline.items():
+            if (dev, inode) not in seen:
+                yield ChangeEvent(kind="delete", path=path, inode=inode, dev=dev)
 
 
 class ZfsDiffFeed:
@@ -227,7 +247,7 @@ class ZfsDiffFeed:
             if entry is None:
                 return None
             kind: ChangeKind = "create" if change == "+" else "modify"
-            return ChangeEvent(kind, path=path, inode=entry.inode, entry=entry)
+            return ChangeEvent(kind, path=path, inode=entry.inode, entry=entry, dev=entry.dev)
         if change == "R" and len(parts) >= 3:
             return await self._rename_event(old=parts[1], new=parts[2], root=root)
         return None
@@ -242,7 +262,7 @@ class ZfsDiffFeed:
         if entry is None:
             return None
         # Same inode, new path → a single MODIFY upsert (cheap path update, incremental ruling).
-        return ChangeEvent("modify", path=new, inode=entry.inode, entry=entry)
+        return ChangeEvent("modify", path=new, inode=entry.inode, entry=entry, dev=entry.dev)
 
     async def _stat_one(self, path: str) -> FsEntry | None:
         """Re-``stat`` a single changed path via a scoped one-entry walk (metadata only).

@@ -518,3 +518,90 @@ async def test_organize_apply_volume_scoped_remediator_not_locked_out(
     assert ex.status_code == 200
     assert [r["status"] for r in ex.json()["results"]] == ["moved"]
     assert (folder / "notes" / "todo.txt").exists()
+
+
+# --- coverage close: server-authoritative build rejections + boundary validation -------------
+
+
+async def test_organize_plan_rejects_duplicate_entry_id(
+    api_client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """EC-organize-ai-5: the same entry listed twice in one plan → 422 'listed twice'.
+
+    A move set that names one source entry under two destinations is incoherent (which target
+    wins?) and is refused at build before anything persists or moves — even when the two targets do
+    not themselves collide.
+    """
+    volume_id, ids, _ = await _seed_folder(tmp_path)
+    folder = tmp_path / "Downloads"
+    auth = await seed_principal(username="org-dup-id", role=Role.REMEDIATOR)
+    resp = await api_client.post(
+        "/api/v1/organize/plan",
+        json={
+            "volume_id": volume_id,
+            "path": str(folder),
+            "moves": [
+                {"entry_id": ids["todo.txt"], "dest_rel": "a/todo.txt"},
+                {"entry_id": ids["todo.txt"], "dest_rel": "b/todo.txt"},
+            ],
+        },
+        headers=auth,
+    )
+    assert resp.status_code == 422, resp.text
+    assert "listed twice" in resp.json()["detail"]
+    assert (folder / "todo.txt").exists()  # nothing moved
+
+
+async def test_organize_plan_rejects_dest_equal_to_current_path(
+    api_client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """EC-organize-ai-6: a target that clamps to the file's CURRENT path → 422 (a no-op move).
+
+    ``dest_rel`` equal to the file's existing relative location resolves to its own path; a no-op
+    move would dispatch a destructive job for no benefit, so the build rejects it.
+    """
+    volume_id, ids, _ = await _seed_folder(tmp_path)
+    folder = tmp_path / "Downloads"
+    auth = await seed_principal(username="org-noop", role=Role.REMEDIATOR)
+    resp = await api_client.post(
+        "/api/v1/organize/plan",
+        json={
+            "volume_id": volume_id,
+            "path": str(folder),
+            # The file already lives at <folder>/todo.txt → this target equals its current path.
+            "moves": [{"entry_id": ids["todo.txt"], "dest_rel": "todo.txt"}],
+        },
+        headers=auth,
+    )
+    assert resp.status_code == 422, resp.text
+    assert "target equals its current path" in resp.json()["detail"]
+    assert (folder / "todo.txt").exists()
+
+
+async def test_organize_plan_rejects_empty_moves(
+    api_client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """EC-organize-ai-14: an empty ``moves`` list is rejected at the boundary (min_length=1)."""
+    volume_id, _ids, _ = await _seed_folder(tmp_path)
+    auth = await seed_principal(username="org-empty-moves", role=Role.REMEDIATOR)
+    resp = await api_client.post(
+        "/api/v1/organize/plan",
+        json={"volume_id": volume_id, "path": str(tmp_path / "Downloads"), "moves": []},
+        headers=auth,
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_organize_plan_rejects_too_many_moves(
+    api_client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """EC-organize-ai-19: more than the 200-move cap is rejected at the boundary (max_length)."""
+    volume_id, ids, _ = await _seed_folder(tmp_path)
+    auth = await seed_principal(username="org-many-moves", role=Role.REMEDIATOR)
+    moves = [{"entry_id": ids["todo.txt"], "dest_rel": f"d{i}/x.txt"} for i in range(201)]
+    resp = await api_client.post(
+        "/api/v1/organize/plan",
+        json={"volume_id": volume_id, "path": str(tmp_path / "Downloads"), "moves": moves},
+        headers=auth,
+    )
+    assert resp.status_code == 422, resp.text

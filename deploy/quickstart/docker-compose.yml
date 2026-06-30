@@ -17,7 +17,10 @@ name: fathom
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector-enabled Postgres 16 (a drop-in superset of postgres:16). Required for the optional
+    # AI-concierge semantic search (ADR-035 Phase 2); plain catalogue use needs none of it, and the
+    # vector extension/table is only created when the concierge embedding migration + pipeline run.
+    image: pgvector/pgvector:pg16
     container_name: fathom-postgres
     restart: unless-stopped
     environment:
@@ -30,6 +33,13 @@ services:
       # onto a dedicated dataset (e.g. /mnt/<pool>/fathom/pgdata:/var/lib/postgresql/data).
       - fathom-pgdata:/var/lib/postgresql/data
     networks: [fathom]
+    # Postgres uses /dev/shm for parallel-query dynamic shared memory; Docker's 64 MB default
+    # overflows on the large reconciliation/rollup queries an estate-sized catalogue runs
+    # ("could not resize shared memory segment: No space left on device"). The size is demand-based
+    # (a tmpfs ceiling, NOT preallocated) and scales with concurrent parallel queries — i.e. with how
+    # many agents push at once — so 2 GB gives comfortable headroom for a fleet pushing in parallel.
+    # It counts toward mem_limit, so raise mem_limit too for very large estates.
+    shm_size: 2gb
     # Hard ceilings so Fathom can never starve the rest of the host. Tune to taste.
     mem_limit: ${FATHOM_DB_MEM_LIMIT:-2g}
     cpus: 2.0
@@ -71,6 +81,10 @@ services:
       # Shared secret proving an ingest request transited the mTLS proxy. Required even before
       # you add agents — a direct call without it is rejected (fail-closed).
       FATHOM_INGEST_PROXY_SECRET: ${FATHOM_INGEST_PROXY_SECRET:?set FATHOM_INGEST_PROXY_SECRET in .env}
+      # Durable encryption key for in-app secrets (runtime settings store). Without it, in-app
+      # secrets are lost on every restart (ephemeral key). See .env.example.
+      FATHOM_SETTINGS_STORE_KEY_REF: ${FATHOM_SETTINGS_STORE_KEY_REF:-}
+      FATHOM_SETTINGS_STORE_KEY: ${FATHOM_SETTINGS_STORE_KEY:-}
       # Localhost + plain http for the quickstart, so the session cookie cannot be Secure-only.
       # Set true (and front with HTTPS) before exposing beyond this machine.
       FATHOM_SESSION_COOKIE_SECURE: ${FATHOM_SESSION_COOKIE_SECURE:-false}

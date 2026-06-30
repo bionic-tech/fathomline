@@ -246,6 +246,23 @@ async def test_oversized_result_field_rejected_at_boundary(
     assert resp.status_code == 422
 
 
+async def test_poll_500_when_job_queue_not_provisioned(settings: Settings) -> None:
+    # The job queue is created unconditionally in the lifespan, so its absence is a wiring bug, not
+    # a default-OFF state: get_job_queue fails loud with a 500 rather than a silent 204 that would
+    # make a fleet of agents quietly never receive jobs (EC-jobs-11). We null it post-startup to
+    # simulate the bug; the host still resolves first, so this is the queue-lookup 500 specifically.
+    await db.dispose_engine()
+    app = create_app(settings)
+    async with LifespanManager(app):
+        app.state.job_queue = None  # simulate the never-wired queue
+        await _seed_hosts()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/api/v1/agents/jobs/poll", headers=NAS1_FP)
+            assert resp.status_code == 500
+    await db.dispose_engine()
+
+
 async def test_expired_job_not_delivered(app_client: tuple[httpx.AsyncClient, JobQueue]) -> None:
     client, queue = app_client
     dispatch = asyncio.create_task(

@@ -25,6 +25,9 @@ const Search = lazy(() =>
 const Organize = lazy(() =>
   import("../features/organize/Organize").then((m) => ({ default: m.Organize })),
 );
+const GettingStarted = lazy(() =>
+  import("../features/onboarding/GettingStarted").then((m) => ({ default: m.GettingStarted })),
+);
 const Duplicates = lazy(() =>
   import("../features/duplicates/Duplicates").then((m) => ({ default: m.Duplicates })),
 );
@@ -49,9 +52,30 @@ const Settings = lazy(() =>
 const LoginPage = lazy(() =>
   import("../auth/LoginPage").then((m) => ({ default: m.LoginPage })),
 );
+// First-run setup wizard (Build P4): an estate-wide modal that overlays the whole authenticated app
+// on first run. Code-split (it renders null whenever it shouldn't show) and mounted ALONGSIDE the
+// AppShell layout — not inside it — so the shell stays a pure layout component.
+const SetupWizardModal = lazy(() =>
+  import("../features/onboarding/SetupWizardModal").then((m) => ({
+    default: m.SetupWizardModal,
+  })),
+);
 
 function withSuspense(node: JSX.Element): JSX.Element {
   return <Suspense fallback={<p role="status">Loading…</p>}>{node}</Suspense>;
+}
+
+// The authenticated layout: the AppShell chrome (which renders the matched child route in its
+// <Outlet/>) plus the first-run setup modal overlaid on top.
+function AppLayout(): JSX.Element {
+  return (
+    <>
+      <AppShell />
+      <Suspense fallback={null}>
+        <SetupWizardModal />
+      </Suspense>
+    </>
+  );
 }
 
 export const routes: RouteObject[] = [
@@ -65,7 +89,7 @@ export const routes: RouteObject[] = [
     children: [
       {
         path: "/",
-        element: <AppShell />,
+        element: <AppLayout />,
         children: [
           { index: true, element: <Navigate to="/dashboard" replace /> },
           { path: "dashboard", element: withSuspense(<Dashboard />) },
@@ -73,6 +97,7 @@ export const routes: RouteObject[] = [
           { path: "search", element: withSuspense(<Search />) },
           { path: "largest", element: withSuspense(<Largest />) },
           { path: "organize", element: withSuspense(<Organize />) },
+          { path: "getting-started", element: withSuspense(<GettingStarted />) },
           { path: "changes", element: withSuspense(<Changes />) },
           { path: "duplicates", element: withSuspense(<Duplicates />) },
           { path: "reconcile", element: withSuspense(<Reconcile />) },

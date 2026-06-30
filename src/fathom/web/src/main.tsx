@@ -5,7 +5,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { createBrowserRouter, RouterProvider } from "react-router-dom";
+import { createMemoryRouter, RouterProvider } from "react-router-dom";
 
 import { ApiError } from "./api/client";
 import { ErrorBoundary } from "./app/ErrorBoundary";
@@ -27,7 +27,11 @@ const queryClient = new QueryClient({
   },
 });
 
-const router = createBrowserRouter(routes);
+// In-memory routing (owner decision): navigation never touches the address bar, so the app's
+// route paths (/dashboard, /settings, …) are not exposed. Trade-off: a full browser refresh resets
+// to the start entry (no deep-linking/bookmarks). The guard then re-runs whoami and lands on the
+// dashboard (or /login). Start at "/" so the index redirect → /dashboard runs once authenticated.
+const router = createMemoryRouter(routes, { initialEntries: ["/"] });
 
 const rootEl = document.getElementById("root");
 if (rootEl !== null) {

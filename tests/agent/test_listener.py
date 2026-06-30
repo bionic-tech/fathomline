@@ -14,11 +14,20 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from fathom.agent.actor import ActorDispatcher, Executor, SignedJobListener
+from fathom.agent.actor import (
+    ActorDispatcher,
+    Executor,
+    RemediationUnavailableError,
+    ScanDispatcher,
+    ScanScopeError,
+    SignedJobListener,
+)
+from fathom.agent.config import AgentConfig
 from fathom.agent.reader.hasher import BackendHasher
+from fathom.agent.runner import AgentRunSummary, ScopeOutcome
 from fathom.backends import PosixBackend
 from fathom.core.audit import AuditChain
-from fathom.core.remediation.job import ActionJob
+from fathom.core.remediation.job import ActionJob, ScanJob
 from fathom.core.remediation.nonce_store import InMemoryNonceStore
 from fathom.core.remediation.plan import PlanAction, PlanItem
 from fathom.core.remediation.signing import (
@@ -30,6 +39,7 @@ from fathom.core.remediation.signing import (
 )
 
 HOST = "nas-1"
+SCAN_ROOT = "/scan/data"
 
 
 def _ed_pair() -> tuple[Ed25519Signer, Ed25519Verifier]:
@@ -187,6 +197,137 @@ async def test_dry_run_job_never_mutates(tmp_path: Path) -> None:
     assert result.drift == {}  # nothing drifted
     assert dup.exists()  # dry-run never mutates
     assert sink == []  # and never audits a mutation
+
+
+def _scan_config(scope_root: str = SCAN_ROOT) -> AgentConfig:
+    return AgentConfig.model_validate(
+        {
+            "host_id": HOST,
+            "ingest_url": "https://core:9443/api/v1/agents/ingest",
+            "client_cert_path": "/etc/fathom/agent.crt",
+            "client_key_path": "/etc/fathom/agent.key",
+            "server_ca_path": "/etc/fathom/ca.crt",
+            "scan_scope": [scope_root],
+            "throttle": {
+                "pause_when": {"load1_above": 6.0, "iowait_above_percent": 25},
+                "resume_when": {"load1_below": 3.0},
+            },
+        }
+    )
+
+
+def _scan_job(*, root: str = SCAN_ROOT, mode: str = "metadata", host_id: str = HOST) -> ScanJob:
+    now = datetime.now(tz=UTC)
+    return ScanJob(
+        nonce="abcdef0123456789abcdef",
+        issued_at=now - timedelta(seconds=1),
+        expires_at=now + timedelta(seconds=300),
+        host_id=host_id,
+        root=root,
+        mode=mode,  # type: ignore[arg-type]
+    )
+
+
+class _RecordingScanRunner:
+    """A fake scan runner: records (root, mode) and returns a canned single-scope summary."""
+
+    def __init__(self, *, entries_seen: int = 42, pushed: int = 40) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self._entries_seen = entries_seen
+        self._pushed = pushed
+
+    async def __call__(self, job: ScanJob) -> AgentRunSummary:
+        self.calls.append((job.root, job.mode))
+        return AgentRunSummary(
+            host_id=HOST,
+            scopes=[ScopeOutcome(job.root, self._entries_seen, self._entries_seen)],
+            pushed=self._pushed,
+        )
+
+
+def _scan_listener(
+    tmp_path: Path,
+    *,
+    verifier: Ed25519Verifier,
+    config: AgentConfig,
+    scan_runner: _RecordingScanRunner,
+) -> SignedJobListener:
+    listener, _sink, _store = _make_listener(tmp_path, verifier=verifier)
+    # Re-build a listener wired with the scan dispatcher (the remediation dispatcher is unchanged).
+    return SignedJobListener(
+        dispatcher=listener._dispatcher,
+        verifier=verifier,
+        nonce_store=listener._nonce_store,
+        host_id=HOST,
+        write_enabled=True,
+        scan_dispatcher=ScanDispatcher(config=config, scan_runner=scan_runner),
+    )
+
+
+async def test_scan_job_triggers_scan_of_right_root_and_mode(tmp_path: Path) -> None:
+    signer, verifier = _ed_pair()
+    runner = _RecordingScanRunner()
+    listener = _scan_listener(
+        tmp_path, verifier=verifier, config=_scan_config(), scan_runner=runner
+    )
+    signed = sign_job(_scan_job(root=SCAN_ROOT, mode="fullbit"), signer)
+    result = await listener.handle(signed)
+    # The scan was triggered for exactly the signed root + mode (not the remediation executor).
+    assert runner.calls == [(SCAN_ROOT, "fullbit")]
+    # The result reuses the read-only dry_run shape with a synthetic scan ledger id + summary row.
+    assert result.mode == "dry_run"
+    assert result.plan_id == f"scan:{HOST}:{SCAN_ROOT}"
+    assert len(result.results) == 1
+    only = result.results[0]
+    assert only.entry_id == SCAN_ROOT
+    assert only.action == "scan_now"
+    assert only.status == "completed"
+    assert "mode=fullbit" in only.detail and "entries_seen=42" in only.detail
+    assert result.audit == []
+
+
+async def test_out_of_scope_scan_job_refused(tmp_path: Path) -> None:
+    signer, verifier = _ed_pair()
+    runner = _RecordingScanRunner()
+    # The agent's scan_scope is /scan/data; /scan/other is out of scope (defence in depth).
+    listener = _scan_listener(
+        tmp_path, verifier=verifier, config=_scan_config(SCAN_ROOT), scan_runner=runner
+    )
+    signed = sign_job(_scan_job(root="/scan/other", mode="metadata"), signer)
+    with pytest.raises(ScanScopeError, match="scan_scope"):
+        await listener.handle(signed)
+    assert runner.calls == []  # no scan was ever triggered
+
+
+async def test_scan_only_listener_refuses_remediation(tmp_path: Path) -> None:
+    # A scan-only listener (dispatcher=None) carries the Scan Now path but REFUSES a verified
+    # remediation ActionJob fail-closed — a read-only host never carries the write path (ADR-027).
+    # (The scan path itself is covered by test_scan_job_triggers_scan_of_right_root_and_mode.)
+    signer, verifier = _ed_pair()
+    runner = _RecordingScanRunner()
+    scan_only = SignedJobListener(
+        dispatcher=None,
+        verifier=verifier,
+        nonce_store=InMemoryNonceStore(),
+        host_id=HOST,
+        write_enabled=False,
+        scan_dispatcher=ScanDispatcher(config=_scan_config(), scan_runner=runner),
+    )
+    dup = tmp_path / "dup.bin"
+    dup.write_bytes(b"x")
+    with pytest.raises(RemediationUnavailableError, match="scan-only"):
+        await scan_only.handle(sign_job(_execute_job(dup), signer))
+    assert runner.calls == []  # nothing scanned either — the job was refused before any dispatch
+
+
+async def test_scan_job_refused_when_listener_has_no_scan_dispatcher(tmp_path: Path) -> None:
+    # A listener built without a scan dispatcher refuses a verified scan job fail-closed (it never
+    # silently swallows a job it cannot service).
+    signer, verifier = _ed_pair()
+    listener, _sink, _store = _make_listener(tmp_path, verifier=verifier)
+    signed = sign_job(_scan_job(), signer)
+    with pytest.raises(ScanScopeError, match="not configured"):
+        await listener.handle(signed)
 
 
 def test_reader_code_path_has_no_executor_import() -> None:

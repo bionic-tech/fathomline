@@ -96,6 +96,29 @@ async def test_override_requires_manage_agents(api_client: httpx.AsyncClient) ->
     assert r.status_code == 403
 
 
+async def test_override_unknown_host_is_404(api_client: httpx.AsyncClient) -> None:
+    # A global operator targeting a host_id that does not exist gets a clean 404 (EC-config-2),
+    # never a 500 or a silently-created override row.
+    admin = await seed_principal(role=Role.ADMIN)
+    r = await api_client.put("/api/v1/agents/999999/config", json=_OVERRIDE, headers=admin)
+    assert r.status_code == 404
+    assert "not found" in r.json()["detail"].lower()
+
+
+async def test_override_out_of_scope_host_is_404(api_client: httpx.AsyncClient) -> None:
+    # A host-scoped operator (MANAGE_AGENTS, but only over a DIFFERENT host) cannot target a host
+    # outside its scope: the scope predicate filters it out and it reads as 404, not 403 — the
+    # route never confirms the existence of a host the principal can't manage (EC-config-2).
+    host_id = await _seed_host(api_client)
+    scoped_admin = await seed_principal(
+        role=Role.ADMIN, scope_kind="host", host_id=host_id + 1000
+    )
+    r = await api_client.put(
+        f"/api/v1/agents/{host_id}/config", json=_OVERRIDE, headers=scoped_admin
+    )
+    assert r.status_code == 404
+
+
 async def test_empty_override_clears_it(api_client: httpx.AsyncClient) -> None:
     host_id = await _seed_host(api_client)
     admin = await seed_principal(role=Role.ADMIN)

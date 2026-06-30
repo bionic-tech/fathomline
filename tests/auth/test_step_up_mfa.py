@@ -12,6 +12,9 @@ from fathom.auth.mfa import (
     is_step_up_fresh,
     verify_totp,
 )
+from fathom.auth.models import User
+from fathom.auth.sessions import create_session, lookup_session, mark_step_up, revoke_session
+from fathom.core import db
 
 
 def test_totp_verify_roundtrip() -> None:
@@ -51,3 +54,26 @@ def test_step_up_naive_timestamp_normalised() -> None:
     now = datetime.now(tz=UTC)
     naive = (now - timedelta(seconds=10)).replace(tzinfo=None)
     assert is_step_up_fresh(naive, now=now) is True
+
+
+async def test_revoke_drops_step_up_and_fresh_session_starts_unstamped(api_client: object) -> None:
+    # Step-up freshness is server-side and per-session: revoking a session makes its stamp
+    # unreachable (the revoked row no longer resolves), and a brand-new session for the same
+    # user starts with mfa_authenticated_at None, so step-up must be re-done (EC-mfa-15).
+    async with db.session_scope() as session:
+        user = User(subject="stepup-revoke", source="local", is_active=True)
+        session.add(user)
+        await session.flush()
+        row, raw = await create_session(session, user_id=user.id, ttl_seconds=3600)
+        await mark_step_up(session, row=row)
+        assert row.mfa_authenticated_at is not None
+        assert is_step_up_fresh(row.mfa_authenticated_at) is True
+        await revoke_session(session, row=row)
+        user_id = user.id
+
+    async with db.session_scope() as session:
+        # The revoked session no longer resolves, so its step-up stamp cannot be replayed.
+        assert await lookup_session(session, raw_token=raw) is None
+        fresh_row, _ = await create_session(session, user_id=user_id, ttl_seconds=3600)
+        assert fresh_row.mfa_authenticated_at is None
+        assert is_step_up_fresh(fresh_row.mfa_authenticated_at) is False

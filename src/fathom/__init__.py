@@ -8,4 +8,4 @@ remediation surfaces are deliberately absent until their own build stages and re
 gates clear (see docs/00-documentation-suite-plan.md "Build order").
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

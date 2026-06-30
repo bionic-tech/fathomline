@@ -6,17 +6,22 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
 
-import { useVolumes, useWhoAmI } from "../api/queries";
+import { useServerConfig, useVolumes, useWhoAmI } from "../api/queries";
 import { volumeLabel } from "../api/types";
 import { principalHas } from "../auth/rbac";
 import { logout } from "../auth/session";
+import { ConciergeWidget } from "../features/concierge/ConciergeWidget";
+import { NotificationBell } from "../features/notifications/NotificationBell";
+import { onboardingCompleted } from "../features/onboarding/onboardingFlag";
 import { useUiStore } from "../state/uiStore";
 
 export function AppShell(): JSX.Element {
   const me = useWhoAmI();
   const volumes = useVolumes();
+  const serverConfig = useServerConfig();
   const selectVolume = useUiStore((s) => s.selectVolume);
   const selectedVolumeId = useUiStore((s) => s.selectedVolumeId);
+  const conciergeDocked = useUiStore((s) => s.conciergeOpen && s.conciergePinned);
   const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -36,11 +41,22 @@ export function AppShell(): JSX.Element {
     didInitScope.current = true;
   }, [firstVolume, selectedVolumeId, selectVolume]);
 
+  // Docking the concierge changes the main content width via CSS (padding-right). ECharts only
+  // re-fit on a window resize, so nudge them once the layout settles — otherwise charts overflow
+  // under the pinned sidebar ("the page doesn't resize to fit").
+  useEffect(() => {
+    const t = setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
+    return () => clearTimeout(t);
+  }, [conciergeDocked]);
+
   // RBAC-aware nav: hide surfaces the principal lacks the capability for. The server still
   // enforces deny-by-default on each request, so this is purely UX (frontend ADD §2; ADD 13 §4).
   const canViewDedup = principalHas(me.data, "view_dedup");
   const canReadAudit = principalHas(me.data, "read_audit");
   const canDeploy = principalHas(me.data, "deploy_agent");
+  // Once the estate has completed first-run onboarding the standalone link retires (the wizard is a
+  // first-run modal now; an admin can re-run it from Settings). Until then it stays in the nav.
+  const onboardingDone = onboardingCompleted(serverConfig.data);
 
   async function onSignOut(): Promise<void> {
     // Revoke the server session + clear client storage, then drop the cached principal so the
@@ -51,12 +67,20 @@ export function AppShell(): JSX.Element {
   }
 
   return (
-    <div className="fathom-shell">
+    <div className={`fathom-shell ${conciergeDocked ? "fathom-shell-docked" : ""}`}>
       <header className="fathom-topbar">
         <nav aria-label="Primary">
           <Link to="/dashboard" aria-current={location.pathname === "/dashboard" ? "page" : undefined}>
             Dashboard
           </Link>
+          {!onboardingDone ? (
+            <Link
+              to="/getting-started"
+              aria-current={location.pathname === "/getting-started" ? "page" : undefined}
+            >
+              Getting Started
+            </Link>
+          ) : null}
           <Link to="/explore" aria-current={location.pathname === "/explore" ? "page" : undefined}>
             Explorer
           </Link>
@@ -124,6 +148,7 @@ export function AppShell(): JSX.Element {
         </label>
 
         <div className="fathom-session">
+          {serverConfig.data?.notifications_enabled ? <NotificationBell /> : null}
           {me.data ? <span>{me.data.display_name ?? me.data.subject}</span> : <span>…</span>}
           <button type="button" onClick={() => void onSignOut()}>
             Sign out
@@ -134,6 +159,8 @@ export function AppShell(): JSX.Element {
       <main>
         <Outlet />
       </main>
+
+      <ConciergeWidget />
     </div>
   );
 }

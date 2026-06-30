@@ -349,6 +349,9 @@ class EnrollRequest(BaseModel):
     mounts: list[ScopeMountIn] = Field(default_factory=list)
     remote_targets: list[RemoteTargetIn] = Field(default_factory=list, max_length=64)
     windows_scan_paths: list[str] = Field(default_factory=list)
+    # Subset of windows_scan_paths to content-hash (ADR-027 W2 full-bit; local-only, never
+    # hydrates cloud placeholders). Empty = metadata-only, the safe default for an unknown drive.
+    windows_fullbit_paths: list[str] = Field(default_factory=list)
     proxy_host_ip: str | None = Field(default=None)
     core_base_url: str | None = Field(default=None)
 
@@ -360,6 +363,12 @@ class EnrollRequest(BaseModel):
     def _windows_requires_scan_paths(self) -> EnrollRequest:
         if self.platform == PLATFORM_WINDOWS and not self.windows_scan_paths:
             raise ValueError("windows enrollment requires at least one windows_scan_paths entry")
+        extra = set(self.windows_fullbit_paths) - set(self.windows_scan_paths)
+        if extra:
+            raise ValueError(
+                "windows_fullbit_paths must be a subset of windows_scan_paths "
+                f"(stray: {sorted(extra)})"
+            )
         return self
 
 
@@ -405,9 +414,15 @@ def _spec(
 
 
 def _windows_spec(
-    settings: Settings, *, host_id: str, scan_paths: list[str], proxy_host_ip: str
+    settings: Settings,
+    *,
+    host_id: str,
+    scan_paths: list[str],
+    fullbit_paths: list[str],
+    proxy_host_ip: str,
 ) -> WindowsBundleSpec:
-    """Build the native Windows W1 bundle spec; map DeploymentError to a 422 (ADR-027)."""
+    """Build the native Windows bundle spec; map DeploymentError to a 422 (ADR-027)."""
+    fullbit = set(fullbit_paths)
     try:
         return WindowsBundleSpec(
             host_id=host_id,
@@ -415,7 +430,7 @@ def _windows_spec(
             # include it). Scheme/port/path come from the configured ingest_url.
             ingest_url=windows_ingest_url(settings.agent_deployment_ingest_url, proxy_host_ip),
             proxy_host_ip=proxy_host_ip,
-            scan_paths=tuple(WindowsScanPath(path=p) for p in scan_paths),
+            scan_paths=tuple(WindowsScanPath(path=p, fullbit=p in fullbit) for p in scan_paths),
         )
     except DeploymentError as exc:
         raise HTTPException(
@@ -650,6 +665,7 @@ async def enroll_route(
             settings,
             host_id=body.host_id,
             scan_paths=body.windows_scan_paths,
+            fullbit_paths=body.windows_fullbit_paths,
             proxy_host_ip=proxy_host_ip,
         )
     else:

@@ -12,6 +12,7 @@ Covers the test_plan write-route cases:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import httpx
 import pytest
 from asgi_lifespan import LifespanManager
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from sqlalchemy import select
 
 from fathom.agent.actor import ActorDispatcher, Executor, SignedJobListener
 from fathom.agent.actor.planner import VerifyReport
@@ -32,6 +34,7 @@ from fathom.core.audit import AuditChain, verify_chain
 from fathom.core.audit_store import persisted_records
 from fathom.core.catalogue.models import DupGroup, DupMember, FsEntryRow, Host, Volume
 from fathom.core.remediation.job import SignedJob
+from fathom.core.remediation.models import RemediationPlanRow
 from fathom.core.remediation.nonce_store import InMemoryNonceStore
 from fathom.core.remediation.signing import Ed25519Signer, Ed25519Verifier
 from fathom.core.settings import Settings
@@ -487,3 +490,289 @@ async def test_runtime_unavailable_returns_503(settings: Settings, tmp_path: Pat
             )
             assert resp.status_code == 503
     await db.dispose_engine()
+
+
+# --- coverage close: group/member/host validation, cross-principal idempotency, blast cap -------
+
+
+async def _seed_empty_group(tmp_path: Path) -> int:
+    """Persist a DupGroup that has NO members (a degenerate group) — returns its id."""
+    async with db.session_scope() as session:
+        group = DupGroup(
+            full_hash="0" * 64,
+            size=0,
+            member_count=0,
+            reclaimable_bytes=0,
+            suggested_keeper_entry_id=None,
+        )
+        session.add(group)
+        await session.flush()
+        return group.id
+
+
+async def _seed_n_member_group(tmp_path: Path, members: int) -> tuple[int, int, int]:
+    """Seed ``members`` byte-identical on-disk files + a dup group. Returns (group, keep, host).
+
+    Blast radius is ``members - 1`` (every copy but the keeper). Each file carries the real BLAKE3
+    a full-bit scan would store, so a dry-run finds no drift.
+    """
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    hasher = BackendHasher(PosixBackend())
+    paths = []
+    for i in range(members):
+        p = data_dir / f"copy{i}.bin"
+        p.write_bytes(b"X" * 4096)
+        paths.append(p)
+    real_hash = await hasher.full(str(paths[0]))
+    async with db.session_scope() as session:
+        host = Host(name="nas-1", cert_fingerprint="ab:cd")
+        session.add(host)
+        await session.flush()
+        volume = Volume(
+            host_id=host.id,
+            mountpoint=str(data_dir),
+            fs_type="zfs",
+            device="tank",
+            transport="sata",
+        )
+        session.add(volume)
+        await session.flush()
+        rows = [
+            FsEntryRow(
+                host_id=host.id,
+                volume_id=volume.id,
+                name=p.name,
+                path=str(p),
+                size_logical=p.stat().st_size,
+                inode=p.stat().st_ino,
+                full_hash=real_hash,
+            )
+            for p in paths
+        ]
+        session.add_all(rows)
+        await session.flush()
+        group = DupGroup(
+            full_hash=real_hash,
+            size=4096,
+            member_count=members,
+            reclaimable_bytes=4096 * (members - 1),
+            suggested_keeper_entry_id=rows[0].id,
+        )
+        group.members = [
+            DupMember(entry_id=r.id, host_id=host.id, volume_id=volume.id, path=r.path)
+            for r in rows
+        ]
+        session.add(group)
+        await session.flush()
+        return group.id, rows[0].id, host.id
+
+
+async def _rewrite_plan_host(plan_id: str, host_id: str) -> None:
+    """Point a built plan at a host id that does not exist (to drive the 'host missing' guard)."""
+    async with db.session_scope() as session:
+        row = (
+            await session.execute(
+                select(RemediationPlanRow).where(RemediationPlanRow.plan_id == plan_id)
+            )
+        ).scalar_one()
+        row.host_id = host_id
+        await session.flush()
+
+
+async def test_build_unknown_group_404(api_client: httpx.AsyncClient, tmp_path: Path) -> None:
+    """EC-REM-6: building against a non-existent group → 404 'duplicate group not found'."""
+    auth = await seed_principal(username="rem-noGroup", role=Role.REMEDIATOR)
+    resp = await api_client.post(
+        "/api/v1/remediation/plans",
+        json={"group_id": 999999, "keep_entry_id": 1},
+        headers=auth,
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == "duplicate group not found"
+
+
+async def test_build_group_with_no_members_404(
+    api_client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """EC-REM-7: a group that exists but has zero members → 404 'group has no members'."""
+    group_id = await _seed_empty_group(tmp_path)
+    auth = await seed_principal(username="rem-empty", role=Role.REMEDIATOR)
+    resp = await api_client.post(
+        "/api/v1/remediation/plans",
+        json={"group_id": group_id, "keep_entry_id": 1},
+        headers=auth,
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == "group has no members"
+
+
+async def test_build_member_entry_missing_409(
+    api_client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """EC-REM-8: a member whose catalogue ``fs_entry`` was deleted → 409 'catalogue entry missing'.
+
+    The prior-state anchor (inode/size/hash) comes from the catalogue, never the client, so a
+    member whose row is gone cannot be planned — a rescan is required first.
+    """
+    group_id, keep_id, _ = await _seed_group(tmp_path)
+    async with db.session_scope() as session:
+        entry = await session.get(FsEntryRow, keep_id)
+        await session.delete(entry)
+        await session.flush()
+    auth = await seed_principal(username="rem-noEntry", role=Role.REMEDIATOR)
+    resp = await api_client.post(
+        "/api/v1/remediation/plans",
+        json={"group_id": group_id, "keep_entry_id": keep_id},
+        headers=auth,
+    )
+    assert resp.status_code == 409, resp.text
+    assert "catalogue entry" in resp.json()["detail"]
+
+
+async def test_dry_run_and_execute_target_host_missing_409(
+    api_client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """EC-REM-8: a plan whose target Host record is gone → 409 'target host missing' on both routes.
+
+    The signed job's host scope is the Host's name (the agent re-verifies it), so dry-run and
+    execute both look the Host up by the plan's stored id; a vanished Host fails closed early.
+    """
+    group_id, keep_id, _ = await _seed_group(tmp_path)
+    mfa = await seed_principal(username="rem-noHost", role=Role.REMEDIATOR, mfa_fresh=True)
+    built = await api_client.post(
+        "/api/v1/remediation/plans",
+        json={"group_id": group_id, "keep_entry_id": keep_id},
+        headers=mfa,
+    )
+    plan_id = built.json()["plan_id"]
+    await _rewrite_plan_host(plan_id, "999999")  # a host id that does not exist
+    dr = await api_client.post(f"/api/v1/remediation/plans/{plan_id}/dry-run", headers=mfa)
+    assert dr.status_code == 409, dr.text
+    assert dr.json()["detail"] == "target host missing"
+    ex = await api_client.post(
+        f"/api/v1/remediation/plans/{plan_id}/execute",
+        json={"confirm_host": "nas-1"},
+        headers=mfa,
+    )
+    assert ex.status_code == 409, ex.text
+    assert ex.json()["detail"] == "target host missing"
+    assert (tmp_path / "data" / "dup.bin").exists()  # nothing acted on
+
+
+async def test_build_idempotency_key_cross_principal_409(
+    api_client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """EC-REM-11: a second principal reusing another's idempotency key → 409, no plan disclosure.
+
+    The key column is globally unique but NOT owner-bound, so the replay lookup is filtered by
+    ``created_by``: B never short-circuits to A's cached plan; B's own insert hits the unique
+    constraint and fails closed with a clean 409 that leaks none of A's plan id / paths.
+    """
+    group_id, keep_id, _ = await _seed_group(tmp_path)
+    a = await seed_principal(username="rem-A", role=Role.REMEDIATOR)
+    b = await seed_principal(username="rem-B", role=Role.REMEDIATOR)
+    body = {"group_id": group_id, "keep_entry_id": keep_id, "idempotency_key": "shared-rem-key"}
+    first = await api_client.post("/api/v1/remediation/plans", json=body, headers=a)
+    assert first.status_code == 201, first.text
+    a_plan_id = first.json()["plan_id"]
+    second = await api_client.post("/api/v1/remediation/plans", json=body, headers=b)
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"] == "idempotency_key already in use"
+    assert a_plan_id not in second.text  # B never sees A's plan id
+
+
+async def test_execute_over_blast_cap_without_confirm_409(tmp_path: Path) -> None:
+    """EC-REM-13: a non-drifted subset over the server blast cap with confirm_blast=False → 409.
+
+    The orchestrator refuses to dispatch an EXECUTE job whose live (non-drifted) item count exceeds
+    the server cap unless ``confirm_blast`` is explicit — the refusal fires before any signed job is
+    issued, so nothing is quarantined.
+    """
+    capped = Settings(
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'catalogue.db'}",
+        auto_create_schema=True,
+        session_cookie_secure=False,
+        remediation_enabled=True,
+        remediation_blast_cap=1,  # blast of 2 (3 copies minus keeper) will exceed this
+    )
+    async for client in _client(capped, tmp_path=tmp_path):
+        group_id, keep_id, _ = await _seed_n_member_group(tmp_path, members=3)
+        mfa = await seed_principal(username="rem-blast", role=Role.REMEDIATOR, mfa_fresh=True)
+        built = await client.post(
+            "/api/v1/remediation/plans",
+            json={"group_id": group_id, "keep_entry_id": keep_id},
+            headers=mfa,
+        )
+        assert built.status_code == 201, built.text
+        assert built.json()["blast_count"] == 2  # exceeds the cap of 1
+        plan_id = built.json()["plan_id"]
+        await client.post(f"/api/v1/remediation/plans/{plan_id}/dry-run", headers=mfa)
+        resp = await client.post(
+            f"/api/v1/remediation/plans/{plan_id}/execute",
+            json={"confirm_host": "nas-1", "confirm_blast": False},
+            headers=mfa,
+        )
+        assert resp.status_code == 409, resp.text
+        assert "confirm_blast" in resp.json()["detail"]
+        # The cap refusal fires before dispatch → every copy is still on disk.
+        assert (tmp_path / "data" / "copy1.bin").exists()
+        assert (tmp_path / "data" / "copy2.bin").exists()
+
+
+# --- single-use nonce ledger (the T-3 replay guard the signed-job channel relies on) -----------
+
+
+async def test_nonce_store_rejects_replay() -> None:
+    """EC-REM-19: a consumed nonce is rejected on a second arrival (single-use ledger).
+
+    The public execute path mints a fresh nonce per dispatch, so a replay never reaches the store
+    through the API — the single-use guarantee is a ledger-level invariant, asserted directly here.
+    """
+    store = InMemoryNonceStore()
+    assert await store.consume("nonce-1", job_id="job-1") is True  # fresh
+    assert await store.consume("nonce-1", job_id="job-1") is False  # replay rejected
+
+
+async def test_nonce_store_concurrent_single_act() -> None:
+    """EC-REM-19: two concurrent consumes of one nonce → exactly one succeeds (no double-act)."""
+    store = InMemoryNonceStore()
+    results = await asyncio.gather(
+        store.consume("nonce-2", job_id="job-2"),
+        store.consume("nonce-2", job_id="job-2"),
+    )
+    assert results.count(True) == 1
+    assert results.count(False) == 1
+
+
+# --- quarantine restore/purge audit (UC-REM-6) -------------------------------------------------
+
+
+async def test_quarantine_restore_purge_audit_rows(
+    api_client: httpx.AsyncClient, tmp_path: Path
+) -> None:
+    """UC-REM-6: restore/purge each write an audited request row; purge carries retention_days.
+
+    Both routes append a hash-chained 'requested' audit row naming the item; purge additionally
+    records the configured retention window so the audit shows WHEN the item becomes purgeable.
+    """
+    mfa = await seed_principal(username="q-audit", role=Role.REMEDIATOR, mfa_fresh=True)
+    restore = await api_client.post(
+        "/api/v1/remediation/quarantine/restore-item/restore", headers=mfa
+    )
+    assert restore.status_code == 202, restore.text
+    purge = await api_client.post("/api/v1/remediation/quarantine/purge-item/purge", headers=mfa)
+    assert purge.status_code == 202, purge.text
+    async with db.session_scope() as session:
+        records = await persisted_records(session)
+        restored = [r for r in records if r.action == "quarantine.restore"]
+        purged = [r for r in records if r.action == "quarantine.purge"]
+        assert len(restored) == 1
+        assert restored[0].result == "requested"
+        assert restored[0].target == "restore-item"
+        assert restored[0].before_state["item"] == "restore-item"
+        assert len(purged) == 1
+        assert purged[0].result == "requested"
+        assert purged[0].target == "purge-item"
+        assert purged[0].before_state["retention_days"] == 7  # Settings default
+        assert verify_chain(records) is True

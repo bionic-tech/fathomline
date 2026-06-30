@@ -81,4 +81,26 @@ describe("PreviewDetailPane", () => {
       screen.queryByRole("button", { name: /generate preview/i }),
     ).not.toBeInTheDocument();
   });
+
+  it("offers no preview for a symlink (EC-explorer-22)", () => {
+    // A symlink has no content of its own — only real files get the on-demand sandboxed preview.
+    render(<PreviewDetailPane entry={fileEntry({ is_symlink: true })} />);
+    expect(screen.getByText("symlink")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /generate preview/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  // The sandbox route's sanitised problem statuses map to friendly, non-leaky copy (no path/stack).
+  it.each([
+    [413, /too large to preview/i],
+    [502, /preview worker is unavailable/i],
+    [504, /preview render timed out/i],
+  ])("maps a %i to friendly preview-error copy", async (status, copy) => {
+    apiGet.mockRejectedValue(new ApiError(status, { status, title: "x" }));
+    render(<PreviewDetailPane entry={fileEntry()} />);
+    fireEvent.click(screen.getByRole("button", { name: /generate preview/i }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(copy);
+  });
 });

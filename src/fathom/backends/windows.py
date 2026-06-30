@@ -1,4 +1,4 @@
-"""Native Windows backend — ADR-027 phase W1: metadata-only, fail-closed.
+"""Native Windows backend — ADR-027: read-only local scanning (metadata W1 + full-bit W2).
 
 Subclasses the POSIX walk machinery (``os.scandir`` maps to Win32 underneath, and CPython
 fills ``st_ino`` with the NTFS file reference number and ``st_dev`` with the volume serial,
@@ -10,9 +10,10 @@ Windows-specific behaviours:
   (:mod:`fathom.backends.winattrs` — the skip-don't-follow / never-hydrate rules);
 - ownership is reported as synthetic: NTFS has SIDs, not uid/gid, so the UI must not render
   a POSIX permission that does not exist (same contract as FAT/exFAT, AR-027 flag);
-- :meth:`open_for_hash` **refuses** — full-content hashing is phase W2 (backup-semantics
-  opens) and ships only with its own review, so W1 is a hard, regression-tested refusal
-  exactly like the remote backends' (not a config flag).
+- :meth:`open_for_hash` (phase W2) hashes LOCAL content, but ``stat``s + classifies each file
+  first and **refuses to open a reparse point or a cloud placeholder** (raising
+  :class:`PlaceholderNotHydratedError`, an ``OSError`` the full-bit funnel skips per-file) —
+  because the open is exactly what would hydrate a placeholder from the cloud.
 
 The backend registers only on Windows (``os.name == "nt"``); on every other platform its
 ``supports()`` is False and only its pure logic is exercised by tests.
@@ -25,16 +26,17 @@ import os
 import shutil
 from collections.abc import AsyncIterator, Collection
 from pathlib import Path
+from typing import BinaryIO
 
 from fathom.backends.base import (
     SYNTHETIC_GID,
     SYNTHETIC_UID,
     AsyncReader,
     FsEntry,
-    FullBitUnsupportedError,
+    PlaceholderNotHydratedError,
     VolumeInfo,
 )
-from fathom.backends.posix import DEFAULT_WALK_CONCURRENCY, PosixBackend
+from fathom.backends.posix import DEFAULT_WALK_CONCURRENCY, PosixBackend, _FileReader
 from fathom.backends.winattrs import classify_attributes, entry_attributes
 from fathom.logging import get_logger
 from fathom.security.winpaths import validate_windows_config_path
@@ -94,14 +96,33 @@ class WindowsBackend(PosixBackend):
             yield entry
 
     async def open_for_hash(self, path: str) -> AsyncReader:
-        """Refused in W1 — full-content hashing arrives with phase W2 (ADR-027).
+        """Open a LOCAL Windows file for content hashing (ADR-027 phase W2) — never hydrating.
 
-        A hard error, not a capability flag: W1 agents are metadata-only regardless of any
-        server-side setting, and opening content is also what hydrates cloud placeholders.
+        Full-bit only ever runs on the host that owns the data, so a local NTFS read is allowed.
+        But the open itself is what would pull a *cloud placeholder* down from the network, so this
+        first ``stat``s the file (no open, no follow) and classifies its attributes: a reparse point
+        or a cloud placeholder (offline / recall-on-open / recall-on-data-access) is refused with
+        :class:`PlaceholderNotHydratedError` (an ``OSError``) so the full-bit funnel skips just that
+        one file — metadata kept, bytes never touched — instead of hydrating it (the drvfs hang the
+        Docker agent hit). There is no ``O_NOFOLLOW`` on Windows; this pre-open reparse check is the
+        equivalent symlink/junction guard. A plain local file is opened read-only and streamed.
         """
-        raise FullBitUnsupportedError(
-            "full-content hashing on Windows is ADR-027 phase W2; the W1 agent is metadata-only"
-        )
+        st = await asyncio.to_thread(os.stat, path, follow_symlinks=False)
+        cls = classify_attributes(entry_attributes(st))
+        if not cls.hash_ok:
+            kind = "reparse point" if cls.is_reparse else "cloud placeholder"
+            raise PlaceholderNotHydratedError(
+                f"refusing to open a {kind} for hashing (never hydrated): {path!r}"
+            )
+        fh = await asyncio.to_thread(self._open_for_read, path)
+        return _FileReader(fh)
+
+    @staticmethod
+    def _open_for_read(path: str) -> BinaryIO:
+        # Read-only, binary, unbuffered (the hasher streams). No O_NOFOLLOW on Windows — the
+        # reparse-point refusal in open_for_hash is the symlink/junction guard instead.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        return os.fdopen(fd, "rb", buffering=0)
 
     async def is_busy(self) -> bool:
         """No /proc/mdstat on Windows; storage-pool resync awareness is a later refinement."""

@@ -60,6 +60,18 @@ class FullBitUnsupportedError(RuntimeError):
     """
 
 
+class PlaceholderNotHydratedError(OSError):
+    """A full-bit open was refused for ONE file because reading it would hydrate it (ADR-027 W2).
+
+    Unlike :class:`FullBitUnsupportedError` (a *backend-wide* refusal), this is per-file: a cloud
+    placeholder (OneDrive et al. — offline / recall-on-open / recall-on-data-access) or a reparse
+    point must never be *opened* for content hashing, because the open is exactly what pulls the
+    bytes down from the cloud (the drvfs hang we saw on the Docker agent). It subclasses ``OSError``
+    so the full-bit funnel treats it like any other unreadable file — skip its content, keep its
+    metadata, never abort the scope — rather than failing the whole pass.
+    """
+
+
 class FsEntry(BaseModel):
     """One filesystem entry as captured by a metadata (``stat``) walk.
 

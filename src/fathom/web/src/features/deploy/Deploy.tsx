@@ -120,6 +120,14 @@ function emptyForm(): HostForm {
   };
 }
 
+// Auto-derive the in-container "agent path" from a real host path picked on the target, so the
+// operator picks ONE drive/folder and the scan mount + scope follow (no hand-kept prefix). The
+// agent always mounts under /scan/<leaf>, e.g. host /mnt/tank → agent /scan/tank.
+function deriveAgentPath(hostPath: string): string {
+  const leaf = hostPath.replace(/[/\\]+$/, "").split(/[/\\]+/).filter(Boolean).pop();
+  return `/scan/${leaf || "data"}`;
+}
+
 function buildCredential(f: HostForm): SshCredentialIn {
   const cred: SshCredentialIn = { username: f.username.trim() };
   if (f.authMethod === "key") {
@@ -569,19 +577,25 @@ export function Deploy(): JSX.Element {
             <fieldset className="fathom-form-grid">
               <legend>Scan scope &amp; proxy</legend>
               <label className="fathom-inline-field">
-                Agent path
-                <input
-                  type="text"
-                  value={form.containerPath}
-                  onChange={(e) => set("containerPath", e.target.value)}
-                />
-              </label>
-              <label className="fathom-inline-field">
                 Host path
                 <input
                   type="text"
                   value={form.hostPath}
-                  onChange={(e) => set("hostPath", e.target.value)}
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      hostPath: e.target.value,
+                      containerPath: deriveAgentPath(e.target.value),
+                    }))
+                  }
+                />
+              </label>
+              <label className="fathom-inline-field">
+                Agent path <span className="fathom-muted fathom-hint">(auto-filled)</span>
+                <input
+                  type="text"
+                  value={form.containerPath}
+                  onChange={(e) => set("containerPath", e.target.value)}
                 />
               </label>
               <label className="fathom-inline-field">
@@ -623,7 +637,13 @@ export function Deploy(): JSX.Element {
                             path,
                           })
                         }
-                        onInclude={(path) => set("hostPath", path)}
+                        onInclude={(path) =>
+                          setForm((f) => ({
+                            ...f,
+                            hostPath: path,
+                            containerPath: deriveAgentPath(path),
+                          }))
+                        }
                       />
                     </div>
                   ) : null}

@@ -15,7 +15,7 @@ boundary, AR-0012) and must never be attached to the agent ingest route.
 from __future__ import annotations
 
 import hmac
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -41,19 +41,41 @@ async def db_session() -> AsyncIterator[AsyncSession]:
 
 
 def request_settings(request: Request) -> Settings:
-    """Return the app-bound settings (set on ``app.state``), falling back to the singleton.
+    """Return the effective settings for this request (env base + in-app overrides; ADR-038).
 
     Reading settings from app state keeps request-time configuration (auth providers, MFA
     freshness, cookie flags, the ingest proxy secret) consistent with the settings the app was
-    built with, including per-test overrides.
+    built with, including per-test overrides. When a runtime settings store is installed on
+    ``app.state`` it overlays the operator's persisted, live-reloaded overrides on that base
+    (in-app value wins) — so a setting changed in the UI takes effect on the next request, no
+    restart. With no store (or no overrides) this is exactly the app-bound base.
     """
     state_settings = getattr(request.app.state, "settings", None)
-    if isinstance(state_settings, Settings):
-        return state_settings
-    return get_settings()
+    base = state_settings if isinstance(state_settings, Settings) else get_settings()
+    store = getattr(request.app.state, "settings_store", None)
+    if store is not None:
+        return store.effective(base)  # type: ignore[no-any-return]
+    return base
 
 
 SettingsDep = Annotated[Settings, Depends(request_settings)]
+
+
+def request_secret_provider(request: Request) -> Callable[[str], str]:
+    """Return the secret resolver for this request: the in-app store in front of env/Docker.
+
+    Composes the runtime settings store (ADR-038) ahead of the env/Docker provider (ADR-010), so a
+    credential typed into the Settings UI resolves by reference exactly like an env secret. With no
+    store installed this is just the env/Docker provider (unchanged behaviour).
+    """
+    from fathom.backends.remote import env_or_docker_secret_provider
+    from fathom.core.settings_store import build_secret_provider
+
+    store = getattr(request.app.state, "settings_store", None)
+    return build_secret_provider(store, env_or_docker_secret_provider)
+
+
+SecretProviderDep = Annotated[Callable[[str], str], Depends(request_secret_provider)]
 
 
 def require_client_fingerprint(

@@ -143,9 +143,32 @@ Linux-developed code had silently assumed away. All three are fixed and regressi
 
 ### Phase W2 — full-content + incremental
 
-Full-bit hashing via backup-semantics opens, and the **NTFS USN change journal** as the
-incremental change feed (the Windows-native equivalent of `zfs diff`/fanotify, and more
-durable than both — the filesystem maintains it).
+**Full-bit content hashing — SHIPPED 2026-06-30.** `WindowsBackend.open_for_hash` now opens
+LOCAL files and streams them to the BLAKE3 funnel (full-bit only ever runs on the host that
+owns the data, so a local NTFS read is in-bounds). The safety rule that made W1 *refuse*
+content opens is preserved as a **per-file `stat`-then-classify gate**: before opening, the
+file's attributes are classified, and a **reparse point** or a **cloud placeholder**
+(`OFFLINE` / `RECALL_ON_OPEN` / `RECALL_ON_DATA_ACCESS`) is refused with
+`PlaceholderNotHydratedError` (an `OSError`) — because the *open itself* is what would pull a
+placeholder's bytes down from the cloud (the drvfs hydration hang seen on the Docker-Desktop
+agent). That error subclasses `OSError`, so the full-bit funnel skips just that one file
+(metadata kept, scope not aborted), exactly like any other unreadable file. There is no
+`O_NOFOLLOW` on Windows, so this pre-open reparse refusal is also the symlink/junction guard
+for hashing. `fullbit_scope` is emitted into the generated agent config from each scan path's
+`fullbit` flag (`winbundle._render_config`). Unit-tested cross-platform (the placeholder/reparse
+cases force the attribute bits; the read case uses a real file); on-Windows full-corpus smoke is
+the remaining validation. *Still pending in W2:* the **NTFS USN change journal** as the
+incremental change feed (the Windows-native equivalent of `zfs diff`/fanotify).
+
+**Scan Now on Windows — the engine enabler now exists.** The signed-job listener gained a
+**scan-only mode** (`write_enabled=false` → verify + run read-only Scan Now jobs, but *refuse*
+remediation jobs with `RemediationUnavailableError`; no executor, no `quarantine_dir`). This is what
+lets a Windows host carry Scan Now **without** the write path that ADR-027 defers below — the
+read-only boundary is preserved. What remains for a Windows host to join Scan Now is **packaging,
+not policy**: a persistent listen launcher + an at-startup scheduled task (or service), and a
+decision on how the shared signing secret reaches the host (the W1 bundle already ships the mTLS
+client key, so the same channel can carry it — but it warrants its own look). Until that packaging
+lands, Windows scans run on the W1/W2 scheduled task; the Linux fleet has the live listener.
 
 ### Explicit non-goal until its own review: the write path
 

@@ -15,7 +15,10 @@ import type {
   AdminUserOut,
   AssignmentOut,
   AuditPage,
+  ConciergeAnswerOut,
+  ConciergeAskRequest,
   CreateAssignmentRequest,
+  CreateUserRequest,
   BuildPlanRequest,
   ChangeOut,
   DeployRequest,
@@ -36,6 +39,7 @@ import type {
   GrowthSeriesOut,
   PlanOut,
   HostOut,
+  EnrollResponse,
   MeResponse,
   OrganizeActivityOut,
   ReconcileOut,
@@ -44,12 +48,22 @@ import type {
   OrganizePlanRequest,
   OrganizeProposalOut,
   ScanCreatedOut,
+  ScanDispatchOut,
+  ScanMode,
   SearchResultOut,
   SizeBasis,
   SnapshotOut,
   TopNItemOut,
   TopNKind,
   ServerConfigOut,
+  SettingsListOut,
+  SettingMutationResult,
+  RevealSecretOut,
+  SetSecretRequest,
+  NotificationListOut,
+  UnreadCountOut,
+  NotifyTestResult,
+  SuitabilityListOut,
   TreemapNodeOut,
   TreeChildOut,
   VolumeOut,
@@ -277,6 +291,18 @@ export function useOrganizeSuggest(): UseMutationResult<
 }
 
 /**
+ * Ask the AI concierge a natural-language question over the catalogue (ADR-035; read-only,
+ * VIEW_METADATA + scope, default-OFF behind concierge_enabled). Returns a grounded answer +
+ * server-built citations; the optional volume/host hints narrow + are scope-checked server-side.
+ */
+export function useConciergeAsk(): UseMutationResult<ConciergeAnswerOut, Error, ConciergeAskRequest> {
+  return useMutation({
+    mutationFn: async (body: ConciergeAskRequest) =>
+      (await apiPost<ConciergeAnswerOut>("/concierge/ask", body)) as ConciergeAnswerOut,
+  });
+}
+
+/**
  * Build a reversible MOVE plan from an approved subset of a proposal (ADR-023; BUILD_REMEDIATION,
  * default-OFF behind organize+remediation). The returned plan_id then drives the SAME remediation
  * dry-run/execute hooks above — apply reuses the gated spine, no second destructive surface.
@@ -296,11 +322,24 @@ export function useReconcile(): UseMutationResult<ReconcileOut, Error, Reconcile
   });
 }
 
-/** Verify a TOTP code to stamp step-up MFA freshness on the session (unlocks execute). */
+/** Begin TOTP enrollment — returns the otpauth:// provisioning URI (carries the secret). */
+export function useMfaEnroll(): UseMutationResult<EnrollResponse, Error, void> {
+  return useMutation({
+    mutationFn: async () =>
+      (await apiPost<EnrollResponse>("/auth/mfa/enroll", {})) as EnrollResponse,
+  });
+}
+
+/** Verify a TOTP code: confirms enrollment AND stamps step-up MFA freshness on the session. */
 export function useMfaVerify(): UseMutationResult<void, Error, string> {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: async (code: string) => {
       await apiPost<void>("/auth/mfa/verify", { code });
+    },
+    onSuccess: () => {
+      // Refresh whoami so mfa_fresh + mfa_enrolled reflect the just-confirmed code.
+      void qc.invalidateQueries({ queryKey: ["whoami"] });
     },
   });
 }
@@ -365,6 +404,22 @@ export function useSetAgentConfig(): UseMutationResult<
   });
 }
 
+export interface ScanNowVars {
+  hostId: number;
+  root: string;
+  mode: ScanMode;
+}
+
+/** Dispatch an on-demand scan of one root on a host's agent (MANAGE_AGENTS; signed-job channel).
+ *  Returns 202 {job_id} when armed; the endpoint 503s until dispatch is enabled on the core — the
+ *  caller surfaces that as a "not enabled yet" hint rather than an error. */
+export function useScanNow(): UseMutationResult<ScanDispatchOut | void, Error, ScanNowVars> {
+  return useMutation({
+    mutationFn: async ({ hostId, root, mode }: ScanNowVars) =>
+      (await apiPost<ScanDispatchOut>(`/agents/${hostId}/scan`, { root, mode })) as ScanDispatchOut,
+  });
+}
+
 // --- audit (READ_AUDIT; hash-chained append-only log) ------------------------------------
 
 /** A page of the hash-chained audit log (auditor/admin only). */
@@ -383,6 +438,17 @@ export function useAdminUsers(enabled = true): UseQueryResult<AdminUserOut[]> {
     queryKey: ["admin-users"],
     queryFn: () => apiGet<AdminUserOut[]>("/users"),
     enabled,
+  });
+}
+
+/** Create a local user with a password (admin; audited server-side). 409 if the subject exists. */
+export function useCreateUser(): UseMutationResult<AdminUserOut | void, unknown, CreateUserRequest> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateUserRequest) => apiPost<AdminUserOut>("/users", body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["admin-users"] });
+    },
   });
 }
 
@@ -505,5 +571,146 @@ export function useProbeVolumes(): UseMutationResult<BrowseVolume[], Error, Pref
   return useMutation({
     mutationFn: async (body: PreflightRequest) =>
       (await apiPost<BrowseVolume[]>("/deployment/probe-volumes", body)) as BrowseVolume[],
+  });
+}
+
+// --- runtime settings store (ADR-038): MANAGE_SETTINGS; secrets +step-up MFA -------------
+
+/** The in-app-manageable settings with effective values (secrets masked). Admin-only. */
+export function useSettings(enabled = true): UseQueryResult<SettingsListOut> {
+  return useQuery({
+    queryKey: ["settings-admin"],
+    queryFn: () => apiGet<SettingsListOut>("/settings"),
+    enabled,
+  });
+}
+
+/** Set one setting's in-app override (validated server-side; live on the next request). */
+export function useSetSetting(): UseMutationResult<
+  SettingMutationResult,
+  Error,
+  { key: string; value: unknown }
+> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ key, value }) =>
+      (await apiPut<SettingMutationResult>(
+        `/settings/${encodeURIComponent(key)}`,
+        { value },
+      )) as SettingMutationResult,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["settings-admin"] });
+      void qc.invalidateQueries({ queryKey: ["server-config"] });
+    },
+  });
+}
+
+/** Reset a setting to its env/default value (delete the override). */
+export function useClearSetting(): UseMutationResult<SettingMutationResult, Error, string> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (key: string) =>
+      (await apiDelete(`/settings/${encodeURIComponent(key)}`)) as unknown as SettingMutationResult,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["settings-admin"] });
+      void qc.invalidateQueries({ queryKey: ["server-config"] });
+    },
+  });
+}
+
+/** Store a free-form named secret (encrypted at rest). Admin + FRESH step-up MFA. */
+export function useSetSecret(): UseMutationResult<SettingMutationResult, Error, SetSecretRequest> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: SetSecretRequest) =>
+      (await apiPut<SettingMutationResult>("/settings/secrets", body)) as SettingMutationResult,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["settings-admin"] });
+    },
+  });
+}
+
+/** Delete a stored named secret. Admin + FRESH step-up MFA. */
+export function useClearSecret(): UseMutationResult<void, Error, string> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (ref: string) => apiDelete(`/settings/secrets/${encodeURIComponent(ref)}`),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["settings-admin"] });
+    },
+  });
+}
+
+/** Reveal a stored secret's plaintext (admin + FRESH step-up MFA). Not cached. */
+export function useRevealSecret(): UseMutationResult<RevealSecretOut, Error, string> {
+  return useMutation({
+    mutationFn: async (key: string) =>
+      (await apiPost<RevealSecretOut>(
+        `/settings/${encodeURIComponent(key)}/reveal`,
+      )) as RevealSecretOut,
+  });
+}
+
+// --- Notification Center (ADR-031) + channels (ADR-039) -----------------------------------
+
+/** The bell list (newest first, scope-filtered) + the unread count. Enabled only when the
+ *  feature is on, so it never fires on a deployment without notifications. */
+export function useNotifications(enabled = true): UseQueryResult<NotificationListOut> {
+  return useQuery({
+    queryKey: ["notifications"],
+    queryFn: () => apiGet<NotificationListOut>("/notifications?limit=50"),
+    enabled,
+  });
+}
+
+/** The cheap unread-count poll behind the bell badge (refetched on an interval). */
+export function useUnreadCount(enabled = true): UseQueryResult<UnreadCountOut> {
+  return useQuery({
+    queryKey: ["notifications-unread"],
+    queryFn: () => apiGet<UnreadCountOut>("/notifications/unread-count"),
+    enabled,
+    refetchInterval: enabled ? 30_000 : false,
+  });
+}
+
+/** Mark specific notifications read; refreshes the list + badge. */
+export function useMarkNotificationsRead(): UseMutationResult<unknown, Error, number[]> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (ids: number[]) => apiPost("/notifications/mark-read", { ids }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["notifications"] });
+      void qc.invalidateQueries({ queryKey: ["notifications-unread"] });
+    },
+  });
+}
+
+/** Mark every in-scope unread notification read. */
+export function useMarkAllNotificationsRead(): UseMutationResult<unknown, Error, void> {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => apiPost("/notifications/mark-all-read"),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["notifications"] });
+      void qc.invalidateQueries({ queryKey: ["notifications-unread"] });
+    },
+  });
+}
+
+/** Send a connectivity test to every enabled outbound channel (admin / MANAGE_SETTINGS). */
+export function useTestNotificationChannels(): UseMutationResult<NotifyTestResult, Error, void> {
+  return useMutation({
+    mutationFn: async () =>
+      (await apiPost<NotifyTestResult>("/notifications/test")) as NotifyTestResult,
+  });
+}
+
+// --- Suitability / onboarding (ADR-037) ---------------------------------------------------
+
+/** Per-host AI-option traffic-lights + the recommended settings (VIEW_METADATA + scope). */
+export function useSuitability(): UseQueryResult<SuitabilityListOut> {
+  return useQuery({
+    queryKey: ["suitability"],
+    queryFn: () => apiGet<SuitabilityListOut>("/suitability"),
   });
 }

@@ -3,9 +3,89 @@
 from __future__ import annotations
 
 import httpx
+import pytest
+from fastapi import HTTPException
 
-from fathom.auth.principal import Role
+from fathom.api.auth_deps import require
+from fathom.auth.models import RoleAssignment, User
+from fathom.auth.principal import Capability, Grant, Principal, Role
+from fathom.auth.scope import ScopeFilter
+from fathom.auth.store import grants_for_user
+from fathom.core import db
 from tests.api.conftest import FINGERPRINT_HEADER, batch, seed_principal
+
+
+def _principal(grants: tuple[Grant, ...]) -> Principal:
+    return Principal(subject="p", source="local", user_id=1, grants=grants)
+
+
+# --- require() dependency: capability + non-empty scope (EC-auth-6) -----------------------
+
+
+async def test_require_empty_scope_403() -> None:
+    """Capability held (viewer→view_metadata) but a host grant names no host → empty scope → 403."""
+    principal = _principal((Grant(role=Role.VIEWER, scope_kind="host", host_id=None),))
+    assert principal.has_capability(Capability.VIEW_METADATA) is True
+    with pytest.raises(HTTPException) as exc:
+        await require(Capability.VIEW_METADATA)(principal)
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "no scope for capability"
+
+
+async def test_require_insufficient_capability_403() -> None:
+    # The other 403 branch: the role does not confer the capability at all.
+    principal = _principal((Grant(role=Role.VIEWER, scope_kind="global"),))
+    with pytest.raises(HTTPException) as exc:
+        await require(Capability.MANAGE_USERS)(principal)
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "insufficient capability"
+
+
+async def test_require_returns_scope_on_success() -> None:
+    principal = _principal((Grant(role=Role.ADMIN, scope_kind="global"),))
+    scope = await require(Capability.MANAGE_USERS)(principal)
+    assert isinstance(scope, ScopeFilter)
+    assert scope.is_global is True
+
+
+# --- grant resolution: identical grants collapse, distinct ones don't (EC-auth-19) -------
+
+
+async def test_duplicate_identical_grants_collapsed(api_client: httpx.AsyncClient) -> None:
+    async with db.session_scope() as session:
+        user = User(subject="dup-dan", source="local", is_active=True)
+        session.add(user)
+        await session.flush()
+        for _ in range(2):  # two byte-identical admin/global rows
+            session.add(
+                RoleAssignment(
+                    user_id=user.id, role="admin", scope_kind="global", granted_by="test"
+                )
+            )
+        user_id = user.id
+    async with db.session_scope() as session:
+        grants = await grants_for_user(session, user_id=user_id)
+    assert len(grants) == 1
+    assert grants[0].role == Role.ADMIN
+    assert grants[0].scope_kind == "global"
+
+
+async def test_distinct_grants_not_collapsed(api_client: httpx.AsyncClient) -> None:
+    async with db.session_scope() as session:
+        user = User(subject="multi-mia", source="local", is_active=True)
+        session.add(user)
+        await session.flush()
+        session.add(
+            RoleAssignment(user_id=user.id, role="viewer", scope_kind="global", granted_by="test")
+        )
+        session.add(
+            RoleAssignment(user_id=user.id, role="operator", scope_kind="global", granted_by="test")
+        )
+        user_id = user.id
+    async with db.session_scope() as session:
+        grants = await grants_for_user(session, user_id=user_id)
+    assert len(grants) == 2
+    assert {g.role for g in grants} == {Role.VIEWER, Role.OPERATOR}
 
 
 async def test_agent_ingest_boundary_unaffected_by_human_auth(

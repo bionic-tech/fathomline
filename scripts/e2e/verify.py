@@ -189,6 +189,24 @@ def main() -> int:
         detail=f"search 'movie' -> {len(sr)} hits (expect {exp['search_movie_count']})",
     )
 
+    # ---- AI concierge: forced-tool find_file, mock-narrated (read-only) ------------------------
+    # Force the find_file tool (a /command) so classification is deterministic; the mock Ollama
+    # supplies the narration. The answer must be grounded in a real citation to the seeded file.
+    cc = c.post("/api/v1/concierge/ask", json={"question": "movie.mkv", "tool": "find_file"})
+    if cc.status_code == 200:
+        body = cc.json()
+        cites = body.get("citations", [])
+        cited_movie = any("movie.mkv" in (ci.get("path") or "") for ci in cites)
+        rep.add(
+            "concierge/find-file",
+            body.get("tool") == "find_file" and bool(body.get("answer")) and cited_movie,
+            api={"tool": body.get("tool"), "citations": len(cites), "cited_movie": cited_movie},
+            expected={"tool": "find_file", "cited_movie": True},
+            detail=f"concierge find_file -> {len(cites)} cites, movie.mkv cited={cited_movie}",
+        )
+    else:
+        rep.add("concierge/find-file", False, detail=f"concierge HTTP {cc.status_code}: {cc.text[:200]}")
+
     # ---- AI organize: suggest (mock LLM) -> plan (build only; no files moved) ------------------
     org = exp["organize"]
     if data_id:
@@ -314,6 +332,99 @@ def main() -> int:
         len(audit["items"]) > 0 and len(rows) > 0 and chain_ok,
         api=len(audit["items"]), db=len(rows), expected="continuous chain",
         detail=f"{len(rows)} audit rows, BLAKE3 chain continuous={chain_ok}",
+    )
+
+    # ---- suitability (ADR-037): per-host AI traffic-lights from reported hardware facts ----------
+    # nas-1 was seeded with capable facts (32 GB RAM + 16 GB GPU) so the large-local option is GREEN
+    # and the recommendation is an 8B local model; tiger-1 has no facts (the "not reported" branch).
+    se = exp["suitability"]
+    suit = c.get("/api/v1/suitability")
+    if suit.status_code == 200:
+        sbody = suit.json()
+        by_name = {h["name"]: h for h in sbody.get("hosts", [])}
+        fh = by_name.get(se["facts_host"], {})
+        nfh = by_name.get(se["nofacts_host"], {})
+        large_green = any(
+            o["key"] == "local_chat_large" and o["rating"] == "green" for o in fh.get("options", [])
+        )
+        ok = (
+            sbody.get("egress_allowed") is se["egress_allowed"]
+            and fh.get("facts_known") is True
+            and fh.get("recommended_chat_provider") == se["facts_recommended_provider"]
+            and fh.get("recommended_chat_model") == se["facts_recommended_model"]
+            and large_green
+            and nfh.get("facts_known") is False
+        )
+        rep.add(
+            "suitability/assess",
+            ok,
+            api={
+                "egress": sbody.get("egress_allowed"),
+                se["facts_host"]: {
+                    "facts_known": fh.get("facts_known"),
+                    "provider": fh.get("recommended_chat_provider"),
+                    "model": fh.get("recommended_chat_model"),
+                    "large_green": large_green,
+                },
+                se["nofacts_host"]: {"facts_known": nfh.get("facts_known")},
+            },
+            expected=se,
+            detail=f"{se['facts_host']} facts_known={fh.get('facts_known')} "
+            f"rec={fh.get('recommended_chat_provider')}/{fh.get('recommended_chat_model')} "
+            f"large_green={large_green}; {se['nofacts_host']} facts_known={nfh.get('facts_known')}; "
+            f"egress_allowed={sbody.get('egress_allowed')}",
+        )
+    else:
+        rep.add("suitability/assess", False, detail=f"suitability HTTP {suit.status_code}: {suit.text[:200]}")
+
+    # ---- notifications bell (ADR-031): the seeded in-app notification is listed + counted unread ---
+    ne = exp["notification"]
+    nl = c.get("/api/v1/notifications")
+    if nl.status_code == 200:
+        nbody = nl.json()
+        items = nbody.get("items", [])
+        seeded = next((it for it in items if it.get("title") == ne["title"]), None)
+        uc = c.get("/api/v1/notifications/unread-count").json().get("unread_count")
+        db_unread = db_query(
+            args.db, "SELECT count(*) FROM notification WHERE read_at IS NULL"
+        )[0][0]
+        ok = (
+            seeded is not None
+            and seeded.get("category") == ne["category"]
+            and seeded.get("read") is False
+            and nbody.get("unread_count", 0) >= 1
+            # poll endpoint agrees it's positive (>= not == : the watch worker may emit between the
+            # two calls, so don't pin the exact count — just that the cheap poll behind the badge works)
+            and (uc or 0) >= 1
+            and db_unread >= 1
+        )
+        rep.add(
+            "notifications/bell",
+            ok,
+            api={"items": len(items), "unread_count": nbody.get("unread_count"), "found": seeded is not None},
+            db={"unread": db_unread},
+            expected=ne,
+            detail=f"{len(items)} notifications; unread API={nbody.get('unread_count')} "
+            f"poll={uc} DB={db_unread}; seeded '{ne['title']}' present={seeded is not None}",
+        )
+    else:
+        rep.add("notifications/bell", False, detail=f"notifications HTTP {nl.status_code}: {nl.text[:200]}")
+
+    # ---- deployment surface (ADR-026): destruction-free assertion of its auth gates --------------
+    # The harness never provisions deploy (no SSH, no CA, no MFA enrolment), so rather than perform a
+    # real enrol we assert the *security contract* of the mounted router: a fresh-MFA-less enrol is
+    # refused 401 (the admin holds DEPLOY_AGENT, so this is the step-up gate, not a capability 403),
+    # and the token-only bundle redeem refuses an anonymous caller 403. Both gates fire before any
+    # side effect — nothing is ever deployed and no agent identity is minted.
+    enroll = c.post("/api/v1/deployment/enroll", json={"host_id": "tiger-1"})
+    bundle = c.get("/api/v1/deployment/enroll/bundle")  # deliberately no Authorization: Bearer token
+    rep.add(
+        "deployment/auth-gates",
+        enroll.status_code == 401 and bundle.status_code == 403,
+        api={"enroll": enroll.status_code, "bundle": bundle.status_code},
+        expected={"enroll": 401, "bundle": 403},
+        detail=f"enroll(no-MFA)->{enroll.status_code} (expect 401 step-up MFA); "
+        f"bundle(no-token)->{bundle.status_code} (expect 403 missing token)",
     )
 
     # ---- write report -------------------------------------------------------------------------

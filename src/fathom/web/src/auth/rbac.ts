@@ -20,7 +20,8 @@ export type Capability =
   | "read_config"
   | "manage_users"
   | "manage_agents"
-  | "deploy_agent";
+  | "deploy_agent"
+  | "manage_settings";
 
 export type Role = "viewer" | "operator" | "remediator" | "auditor" | "admin";
 
@@ -50,6 +51,7 @@ const ALL: Capability[] = [
   "manage_users",
   "manage_agents",
   "deploy_agent",
+  "manage_settings",
 ];
 
 const ROLE_CAPS: Record<Role, Capability[]> = {

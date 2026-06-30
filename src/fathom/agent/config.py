@@ -198,7 +198,7 @@ class RemoteBackendConfig(BaseModel):
 # non-identity. NOT write_enabled (enabling the write/quarantine path remotely is too sensitive),
 # and never host_id / ingest_url / cert paths / secret refs (identity + transport stay local).
 _OVERRIDABLE_FIELDS = frozenset(
-    {"scan_scope", "fullbit_scope", "exclude_scope", "cross_mounts", "throttle"}
+    {"scan_scope", "fullbit_scope", "exclude_scope", "scope_labels", "cross_mounts", "throttle"}
 )
 
 
@@ -225,6 +225,13 @@ class AgentConfig(BaseModel):
     # exclude /var/lib/docker, or C:\Windows, under a wider scan root). Operator-overridable
     # (ADR-033) and re-validated like scan_scope. Empty by default. Glob patterns are out of scope.
     exclude_scope: list[str] = Field(default_factory=list)
+    # Per-scan-root DISPLAY label (ADR-029 relabel): maps a scan_scope root (often a synthetic
+    # container mount like ``/scan/docker_data``) to the real host path shown in the UI as the
+    # volume's ``display_name`` (e.g. ``/mnt/docker_data``). Set by the deploy wizard from the
+    # picked drive; empty -> the mountpoint shows as-is. Display-only: never affects what is
+    # scanned or the stored mountpoint. Operator-overridable (ADR-033) so a label can be fixed
+    # from core without re-issuing the bundle.
+    scope_labels: dict[str, str] = Field(default_factory=dict)
     write_enabled: bool = False
     # --- Remediation actor trust (remediation-enable; only used when write_enabled) --------
     # The trusted-key reference the actor's signed-job listener verifies orchestrator jobs

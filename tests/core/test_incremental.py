@@ -2,8 +2,10 @@
 
 Covers the server-side incremental reconciliation:
 - CREATE vs MODIFY classification (new inode, changed size/mtime, unchanged → no churn);
-- explicit DELETE via removed_inodes flips present=False + removed_at and emits a DELETE churn row
-  with a negative size_delta (NOT snapshot-staleness inference);
+- explicit DELETE via removed_keys (dev, inode) flips present=False + removed_at and emits a DELETE
+  churn row with a negative size_delta (NOT snapshot-staleness inference);
+- removals key on (dev, inode): a cross-dataset inode collision flips only the right device's row;
+- a legacy inode-only key ((None, inode)) from a pre-(dev,inode) agent still applies the removal;
 - resurrection: a previously-removed inode re-appearing classifies CREATE;
 - feed-disabled volume writes NO change_log rows but still maintains presence markers;
 - a duplicate removal in a later cycle is a no-op (no double-count, no re-stamp);
@@ -75,6 +77,7 @@ async def _add_entry(
     mtime: float,
     present: bool = True,
     removed_at: datetime | None = None,
+    dev: int = 0,
 ) -> FsEntryRow:
     row = FsEntryRow(
         host_id=vol.host_id,
@@ -91,6 +94,7 @@ async def _add_entry(
         uid=0,
         gid=0,
         inode=inode,
+        dev=dev,
         flags={},
         present=present,
         removed_at=removed_at,
@@ -126,7 +130,7 @@ async def test_create_modify_unchanged_classification(session: AsyncSession) -> 
         volume_id=vol.id,
         rows=rows,
         prior=prior,
-        removed_inodes=[],
+        removed_keys=[],
         log_changes=True,
         now=_T0,
     )
@@ -151,7 +155,7 @@ async def test_explicit_delete_marks_not_present_with_negative_delta(
         volume_id=vol.id,
         rows=[],
         prior={},
-        removed_inodes=[1],
+        removed_keys=[(0, 1)],
         log_changes=True,
         now=_T0,
     )
@@ -186,7 +190,7 @@ async def test_resurrection_of_removed_inode_is_create(session: AsyncSession) ->
         volume_id=vol.id,
         rows=[_row(7, "/mnt/pool/back", size=64, mtime=1000.0)],
         prior=prior,
-        removed_inodes=[],
+        removed_keys=[],
         log_changes=True,
         now=_T0,
     )
@@ -207,7 +211,7 @@ async def test_feed_disabled_writes_no_change_log_but_keeps_markers(
         volume_id=vol.id,
         rows=[_row(2, "/mnt/pool/y", size=5, mtime=1000.0)],  # a create
         prior=prior,
-        removed_inodes=[1],  # a delete
+        removed_keys=[(0, 1)],  # a delete
         log_changes=False,
         now=_T0,
     )
@@ -227,7 +231,7 @@ async def test_duplicate_removal_is_noop(session: AsyncSession) -> None:
         volume_id=vol.id,
         rows=[],
         prior={},
-        removed_inodes=[1],
+        removed_keys=[(0, 1)],
         log_changes=True,
         now=_T0,
     )
@@ -238,7 +242,7 @@ async def test_duplicate_removal_is_noop(session: AsyncSession) -> None:
         volume_id=vol.id,
         rows=[],
         prior={},
-        removed_inodes=[1],  # already removed → no-op
+        removed_keys=[(0, 1)],  # already removed → no-op
         log_changes=True,
         now=later,
     )
@@ -275,3 +279,68 @@ async def test_prune_change_log_respects_window(session: AsyncSession) -> None:
 async def test_prune_change_log_rejects_bad_window(session: AsyncSession) -> None:
     with pytest.raises(ValueError, match="retention_days"):
         await prune_change_log(session, retention_days=0)
+
+
+async def test_cross_mount_inode_collision_removal_keys_on_dev_inode(
+    session: AsyncSession,
+) -> None:
+    # EC-changes-14 (FIXED): removals key on (dev, inode), matching the catalogue identity. On a
+    # cross_mounts volume two ZFS child datasets reuse the same low inode number (42); a removal for
+    # (dev=1, inode=42) — meant for only the ds1 copy — flips ONLY the ds1 row. The ds2 copy
+    # (dev=2, inode=42) stays present, and exactly one DELETE churn row is emitted, for the
+    # genuinely-removed copy. Before the fix the inode-only key flipped BOTH rows and emitted a
+    # false DELETE for the survivor.
+    vol = await _seed_volume(session)
+    ds1 = await _add_entry(
+        session, vol, inode=42, path="/mnt/pool/ds1/keep", size=100, mtime=1000.0, dev=1
+    )
+    ds2 = await _add_entry(
+        session, vol, inode=42, path="/mnt/pool/ds2/keep", size=200, mtime=1000.0, dev=2
+    )
+    rec = ChangeReconciler(session)
+
+    removal = await rec.reconcile(
+        host_id=vol.host_id,
+        volume_id=vol.id,
+        rows=[],
+        prior={},
+        removed_keys=[(1, 42)],  # the precise (dev, inode) of the removed ds1 copy
+        log_changes=True,
+        now=_T0,
+    )
+    assert removal.removed == 1  # ONLY the (dev=1, inode=42) row flipped — no cross-dataset bleed
+    assert removal.changes_logged == 1  # exactly one DELETE churn row, for the removed copy
+    await session.refresh(ds1)
+    await session.refresh(ds2)
+    assert ds1.present is False  # the genuinely-removed copy
+    assert ds2.present is True  # the still-existing copy is untouched (the bug is fixed)
+
+    churn = await _churn(session)
+    assert churn[-1].change_type == "delete"
+    assert churn[-1].path == "/mnt/pool/ds1/keep"  # the churn row names the removed copy
+    assert churn[-1].size_delta == -100
+
+
+async def test_legacy_inode_only_removal_still_applies(session: AsyncSession) -> None:
+    # A pre-(dev,inode) agent sends only removed_inodes (no dev); ingest carries those as
+    # (None, inode) legacy keys and reconcile falls back to an inode-only match, so the removal
+    # still applies and emits its DELETE churn row (backward-compatible wire change).
+    vol = await _seed_volume(session)
+    await _add_entry(session, vol, inode=7, path="/mnt/pool/gone", size=64, mtime=1000.0, dev=0)
+    rec = ChangeReconciler(session)
+    result = await rec.reconcile(
+        host_id=vol.host_id,
+        volume_id=vol.id,
+        rows=[],
+        prior={},
+        removed_keys=[(None, 7)],  # legacy inode-only key
+        log_changes=True,
+        now=_T0,
+    )
+    assert result.removed == 1
+    entry = (await session.execute(select(FsEntryRow).where(FsEntryRow.inode == 7))).scalar_one()
+    assert entry.present is False
+    assert _naive(entry.removed_at) == _T0.replace(tzinfo=None)
+    churn = await _churn(session)
+    assert churn[-1].change_type == "delete"
+    assert churn[-1].size_delta == -64

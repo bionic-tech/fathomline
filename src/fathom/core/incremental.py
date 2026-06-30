@@ -6,11 +6,12 @@ into catalogue truth without ever inferring deletion from snapshot staleness (th
 owner ruling):
 
 * A re-appearing or changed entry is upserted by the existing idempotent
-  ``(host_id, volume_id, inode)`` path; this module classifies it CREATE (new or resurrected
+  ``(host_id, volume_id, dev, inode)`` path; this module classifies it CREATE (new or resurrected
   row) vs MODIFY (size/mtime changed) so the churn feed is accurate.
-* An ``inode`` in ``removed_inodes`` flips its row to ``present=False, removed_at=<ts>`` — the
-  row is **kept** (a subtree's history survives the file that produced it) and a DELETE churn
-  row is recorded. The same inode re-appearing later resurrects the row to ``present=True``.
+* A removed entry — identified by its ``(dev, inode)`` key (with a legacy inode-only fallback for
+  pre-(dev,inode) agents) — flips its row to ``present=False, removed_at=<ts>``; the row is
+  **kept** (a subtree's history survives the file that produced it) and a DELETE churn row is
+  recorded. The same ``(dev, inode)`` re-appearing later resurrects the row to ``present=True``.
 * A *rename* is a cheap path update where the feed can detect it (same inode, new path): that is
   just a MODIFY upsert on the existing inode. Where it cannot be detected it surfaces as a
   DELETE of the old path plus a CREATE of the new — exactly the "rename = cheap path update
@@ -26,13 +27,45 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 
-from sqlalchemy import CursorResult, delete, select, update
+from sqlalchemy import (
+    ColumnElement,
+    CursorResult,
+    delete,
+    or_,
+    select,
+    tuple_,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fathom.core.catalogue.models import ChangeLog, FsEntryRow, Volume
 from fathom.logging import get_logger
 
 _log = get_logger("fathom.core.incremental")
+
+
+def _removal_filter(
+    removed_keys: list[tuple[int | None, int]],
+) -> ColumnElement[bool] | None:
+    """Build the WHERE clause matching ``removed_keys`` on ``(dev, inode)`` (legacy: inode only).
+
+    Removals key on the catalogue identity ``(dev, inode)`` so a removal on a ``cross_mounts``
+    volume — where ZFS child datasets reuse low inode numbers — flips only the right device's row.
+    A precise key ``(dev, inode)`` matches the row-value pair; a legacy key ``(None, inode)`` from a
+    pre-(dev,inode) agent falls back to an inode-only match. The two are OR-combined. Returns
+    ``None`` when there is nothing to remove (the caller then short-circuits).
+    """
+    precise = [(dev, inode) for dev, inode in removed_keys if dev is not None]
+    legacy = [inode for dev, inode in removed_keys if dev is None]
+    clauses: list[ColumnElement[bool]] = []
+    if precise:
+        # Row-value IN — renders on SQLite 3.15+ (and Postgres) as a tuple membership test.
+        clauses.append(tuple_(FsEntryRow.dev, FsEntryRow.inode).in_(precise))
+    if legacy:
+        clauses.append(FsEntryRow.inode.in_(legacy))
+    if not clauses:
+        return None
+    return or_(*clauses)
 
 ChangeType = Literal["create", "modify", "delete"]
 # The closed vocabulary the churn feed and the ChangeOut wire schema share.
@@ -115,7 +148,7 @@ class ChangeReconciler:
         volume_id: int,
         rows: list[dict[str, object]],
         prior: dict[tuple[int, int], PriorState],
-        removed_inodes: list[int],
+        removed_keys: list[tuple[int | None, int]],
         log_changes: bool,
         now: datetime | None = None,
     ) -> ReconcileResult:
@@ -126,7 +159,8 @@ class ChangeReconciler:
             rows: The vetted upsert rows (already written by the ingest upsert); each carries
                 ``inode``/``path``/``size_logical``/``mtime``.
             prior: The pre-upsert state from :meth:`snapshot_prior`.
-            removed_inodes: Inodes the feed observed removed (explicit deletions).
+            removed_keys: The entries the feed observed removed (explicit deletions), each a
+                ``(dev, inode)`` key — or ``(None, inode)`` for a legacy inode-only removal.
             log_changes: Whether the volume's churn feed is enabled (writes change_log rows).
             now: Injectable timestamp (tests). Defaults to ``datetime.now(UTC)``.
 
@@ -160,14 +194,14 @@ class ChangeReconciler:
                 )
             )
 
-        # 2. DELETE: flip removed inodes to not-present, keep the row, record the size freed.
+        # 2. DELETE: flip removed entries to not-present, keep the row, record the size freed.
         result.removed = await self._mark_removed(
-            host_id=host_id, volume_id=volume_id, removed_inodes=removed_inodes, when=when
+            host_id=host_id, volume_id=volume_id, removed_keys=removed_keys, when=when
         )
         if log_changes:
             churn.extend(
                 await self._removal_churn(
-                    host_id=host_id, volume_id=volume_id, removed_inodes=removed_inodes, when=when
+                    host_id=host_id, volume_id=volume_id, removed_keys=removed_keys, when=when
                 )
             )
 
@@ -195,31 +229,28 @@ class ChangeReconciler:
         *,
         host_id: int,
         volume_id: int,
-        removed_inodes: list[int],
+        removed_keys: list[tuple[int | None, int]],
         when: datetime,
     ) -> int:
-        """Flip live rows for ``removed_inodes`` to ``present=False`` and return the count.
+        """Flip live rows for ``removed_keys`` to ``present=False`` and return the count.
 
-        Only rows that are currently present are flipped (so a duplicate removal in a later batch
-        is a no-op and does not double-count or re-stamp ``removed_at``).
-
-        KNOWN LIMITATION (tracked; review P3): removals are keyed on ``inode`` alone, whereas the
-        catalogue identity (and the CREATE/MODIFY classification above) is ``(dev, inode)``. On a
-        ``cross_mounts`` volume spanning ZFS child datasets that reuse low inode numbers, a removal
-        batch could in principle flip the wrong device's row to ``present=False`` (it resurrects on
-        the next walk, so it is self-healing, never data loss). The correct fix is a wire change —
-        the agent's incremental delta carrying ``(dev, inode)`` pairs — done deliberately (with its
-        own migration/contract bump) rather than inferred here; ``removed_inodes`` stays inode-only
-        until then.
+        Removals are keyed on ``(dev, inode)`` — matching the catalogue identity and the
+        CREATE/MODIFY classification above — so a removal on a ``cross_mounts`` volume (ZFS child
+        datasets reuse low inode numbers) flips only the right device's row, never a colliding
+        inode on another dataset. A legacy ``(None, inode)`` key (from a pre-(dev,inode) agent)
+        falls back to an inode-only match. Only rows that are currently present are flipped (so a
+        duplicate removal in a later batch is a no-op and does not double-count or re-stamp
+        ``removed_at``).
         """
-        if not removed_inodes:
+        match = _removal_filter(removed_keys)
+        if match is None:
             return 0
         stmt = (
             update(FsEntryRow)
             .where(
                 FsEntryRow.host_id == host_id,
                 FsEntryRow.volume_id == volume_id,
-                FsEntryRow.inode.in_(removed_inodes),
+                match,
                 FsEntryRow.present.is_(True),
             )
             .values(present=False, removed_at=when)
@@ -232,23 +263,24 @@ class ChangeReconciler:
         *,
         host_id: int,
         volume_id: int,
-        removed_inodes: list[int],
+        removed_keys: list[tuple[int | None, int]],
         when: datetime,
     ) -> list[ChangeLog]:
         """Build a DELETE churn row per removed path (size_delta = -freed bytes).
 
         Reads the (now not-present) rows back so the churn row carries the real path + freed
         size. Only rows whose ``removed_at == when`` are included so a no-op duplicate removal
-        emits no churn row.
+        emits no churn row. Matches on the same ``(dev, inode)`` keys as :meth:`_mark_removed`.
         """
-        if not removed_inodes:
+        match = _removal_filter(removed_keys)
+        if match is None:
             return []
         rows = (
             await self._session.execute(
                 select(FsEntryRow.path, FsEntryRow.size_logical).where(
                     FsEntryRow.host_id == host_id,
                     FsEntryRow.volume_id == volume_id,
-                    FsEntryRow.inode.in_(removed_inodes),
+                    match,
                     FsEntryRow.removed_at == when,
                 )
             )

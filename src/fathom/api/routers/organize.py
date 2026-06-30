@@ -28,7 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fathom.api.auth_deps import PrincipalDep, require
-from fathom.api.deps import SessionDep, SettingsDep
+from fathom.api.deps import SecretProviderDep, SessionDep, SettingsDep
 from fathom.api.remediation_runtime import get_runtime
 from fathom.api.schemas import (
     OrganizeActivityOut,
@@ -91,6 +91,7 @@ async def organize_suggest(
     body: OrganizeSuggestRequest,
     session: SessionDep,
     settings: SettingsDep,
+    secret_provider: SecretProviderDep,
     scope: OrganizeScopeDep,
 ) -> OrganizeProposalOut:
     """Propose a reorganisation for the files under ``path`` (read-only; nothing is moved)."""
@@ -106,8 +107,12 @@ async def organize_suggest(
     root = _require_root_in_volume(body.path, volume)
 
     try:
-        provider = build_inference_provider(settings)
-        service = OrganizeService(session, provider, model=settings.organize_model)
+        # One cohesive model: the per-feature override if set, else the global inference_model.
+        chat_model = settings.organize_model or settings.inference_model
+        provider = build_inference_provider(
+            settings, model=chat_model, secret_provider=secret_provider
+        )
+        service = OrganizeService(session, provider, model=chat_model)
         proposal = await service.suggest(
             volume_id=body.volume_id, root=root, scope=scope, max_files=body.max_files
         )
@@ -230,7 +235,7 @@ async def organize_plan(
             scope.check_target(host_id=int(existing.host_id), volume_id=existing.volume_id)
             return await _organize_plan_out(session, existing)
 
-    service = OrganizeService(session, model=settings.organize_model)
+    service = OrganizeService(session, model=settings.organize_model or settings.inference_model)
     plan_id = f"org-{secrets.token_hex(8)}"
     try:
         build = await service.build_move_plan(
